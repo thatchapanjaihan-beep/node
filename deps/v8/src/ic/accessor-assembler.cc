@@ -30,6 +30,8 @@
 namespace v8 {
 namespace internal {
 
+#include "src/codegen/define-code-stub-assembler-macros.inc"
+
 //////////////////// Private helpers.
 
 #define LOAD_KIND(kind) \
@@ -256,10 +258,10 @@ void AccessorAssembler::TryEnumeratedKeyedLoad(
     {
       TNode<PropertyArray> properties = CAST(LoadFastProperties(
           CAST(p->receiver_and_lookup_start_object()), true));
-      TNode<IntPtrT> offset = Signed(ChangeUint32ToWord(
-          Int32Add(Word32Shl(Int32Sub(zero, field_index),
-                             Int32Constant(kTaggedSizeLog2 - 1)),
-                   Int32Constant(FixedArray::kHeaderSize - kTaggedSize))));
+      TNode<IntPtrT> offset = Signed(ChangeUint32ToWord(Int32Add(
+          Word32Shl(Int32Sub(zero, field_index),
+                    Int32Constant(kTaggedSizeLog2 - 1)),
+          Int32Constant(OFFSET_OF_DATA_START(FixedArray) - kTaggedSize))));
       result = LoadObjectField(properties, offset);
       Goto(&done);
     }
@@ -289,10 +291,10 @@ void AccessorAssembler::TryEnumeratedKeyedLoad(
     {
       TNode<PropertyArray> properties = CAST(LoadFastProperties(
           CAST(p->receiver_and_lookup_start_object()), true));
-      TNode<IntPtrT> offset = Signed(ChangeUint32ToWord(
-          Int32Add(Word32Shl(Int32Sub(zero, field_index),
-                             Int32Constant(kTaggedSizeLog2)),
-                   Int32Constant(FixedArray::kHeaderSize - kTaggedSize))));
+      TNode<IntPtrT> offset = Signed(ChangeUint32ToWord(Int32Add(
+          Word32Shl(Int32Sub(zero, field_index),
+                    Int32Constant(kTaggedSizeLog2)),
+          Int32Constant(OFFSET_OF_DATA_START(FixedArray) - kTaggedSize))));
       field = LoadObjectField(properties, offset);
       Goto(&loaded_field);
     }
@@ -3547,7 +3549,7 @@ void AccessorAssembler::ScriptContextTableLookup(
   TVARIABLE(IntPtrT, context_index, IntPtrConstant(-1));
   Label loop(this, &context_index);
   TNode<IntPtrT> num_script_contexts = PositiveSmiUntag(CAST(LoadObjectField(
-      script_context_table, ScriptContextTable::kLengthOffset)));
+      script_context_table, offsetof(ScriptContextTable, length_))));
   Goto(&loop);
 
   BIND(&loop);
@@ -5391,6 +5393,8 @@ void AccessorAssembler::BranchIfPrototypesHaveNoElements(
 
 #undef LOAD_KIND
 #undef STORE_KIND
+
+#include "src/codegen/undef-code-stub-assembler-macros.inc"
 
 }  // namespace internal
 }  // namespace v8

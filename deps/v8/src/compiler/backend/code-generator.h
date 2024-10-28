@@ -234,15 +234,25 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
   void AssembleArchBinarySearchSwitch(Instruction* instr);
   void AssembleArchTableSwitch(Instruction* instr);
 
-  // Generates code that checks whether the {kJavaScriptCallCodeStartRegister}
+  // Generates code to check whether the {kJavaScriptCallCodeStartRegister}
   // contains the expected pointer to the start of the instruction stream.
   void AssembleCodeStartRegisterCheck();
+
+#ifdef V8_ENABLE_LEAPTIERING
+  // Generates code to check whether the {kJavaScriptCallDispatchHandleRegister}
+  // references a valid entry compatible with this code.
+  void AssembleDispatchHandleRegisterCheck();
+#endif  // V8_ENABLE_LEAPTIERING
 
   // When entering a code that is marked for deoptimization, rather continuing
   // with its execution, we jump to a lazy compiled code. We need to do this
   // because this code has already been deoptimized and needs to be unlinked
   // from the JS functions referring it.
   void BailoutIfDeoptimized();
+
+  // Assemble NOP instruction for lazy deoptimization. This place will be
+  // patched later as a jump instruction to deoptimization trampoline.
+  void AssemblePlaceHolderForLazyDeopt(Instruction* instr);
 
   // Generates an architecture-specific, descriptor-specific prologue
   // to set up a stack frame.
@@ -342,9 +352,9 @@ class V8_EXPORT_PRIVATE CodeGenerator final : public GapResolver::Assembler {
   // Adds a jump table that is emitted after the actual code.  Returns label
   // pointing to the beginning of the table.  {targets} is assumed to be static
   // or zone allocated.
-  Label* AddJumpTable(Label** targets, size_t target_count);
+  Label* AddJumpTable(base::Vector<Label*> targets);
   // Emits a jump table.
-  void AssembleJumpTable(Label** targets, size_t target_count);
+  void AssembleJumpTable(base::Vector<Label*> targets);
 
   // ===========================================================================
   // ================== Deoptimization table construction. =====================

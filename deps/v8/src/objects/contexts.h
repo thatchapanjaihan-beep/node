@@ -54,6 +54,7 @@ enum ContextLookupFlags {
     async_module_evaluate_internal)                                            \
   V(REFLECT_APPLY_INDEX, JSFunction, reflect_apply)                            \
   V(REFLECT_CONSTRUCT_INDEX, JSFunction, reflect_construct)                    \
+  V(PERFORM_PROMISE_THEN_INDEX, JSFunction, perform_promise_then)              \
   V(PROMISE_THEN_INDEX, JSFunction, promise_then)                              \
   V(PROMISE_RESOLVE_INDEX, JSFunction, promise_resolve)                        \
   V(FUNCTION_PROTOTYPE_APPLY_INDEX, JSFunction, function_prototype_apply)      \
@@ -64,11 +65,11 @@ enum ContextLookupFlags {
   V(INT16_ARRAY_FUN_INDEX, JSFunction, int16_array_fun)                        \
   V(UINT32_ARRAY_FUN_INDEX, JSFunction, uint32_array_fun)                      \
   V(INT32_ARRAY_FUN_INDEX, JSFunction, int32_array_fun)                        \
-  V(FLOAT32_ARRAY_FUN_INDEX, JSFunction, float32_array_fun)                    \
-  V(FLOAT64_ARRAY_FUN_INDEX, JSFunction, float64_array_fun)                    \
-  V(UINT8_CLAMPED_ARRAY_FUN_INDEX, JSFunction, uint8_clamped_array_fun)        \
   V(BIGUINT64_ARRAY_FUN_INDEX, JSFunction, biguint64_array_fun)                \
   V(BIGINT64_ARRAY_FUN_INDEX, JSFunction, bigint64_array_fun)                  \
+  V(UINT8_CLAMPED_ARRAY_FUN_INDEX, JSFunction, uint8_clamped_array_fun)        \
+  V(FLOAT32_ARRAY_FUN_INDEX, JSFunction, float32_array_fun)                    \
+  V(FLOAT64_ARRAY_FUN_INDEX, JSFunction, float64_array_fun)                    \
   V(FLOAT16_ARRAY_FUN_INDEX, JSFunction, float16_array_fun)                    \
   V(RAB_GSAB_UINT8_ARRAY_MAP_INDEX, Map, rab_gsab_uint8_array_map)             \
   V(RAB_GSAB_INT8_ARRAY_MAP_INDEX, Map, rab_gsab_int8_array_map)               \
@@ -76,12 +77,12 @@ enum ContextLookupFlags {
   V(RAB_GSAB_INT16_ARRAY_MAP_INDEX, Map, rab_gsab_int16_array_map)             \
   V(RAB_GSAB_UINT32_ARRAY_MAP_INDEX, Map, rab_gsab_uint32_array_map)           \
   V(RAB_GSAB_INT32_ARRAY_MAP_INDEX, Map, rab_gsab_int32_array_map)             \
-  V(RAB_GSAB_FLOAT32_ARRAY_MAP_INDEX, Map, rab_gsab_float32_array_map)         \
-  V(RAB_GSAB_FLOAT64_ARRAY_MAP_INDEX, Map, rab_gsab_float64_array_map)         \
-  V(RAB_GSAB_UINT8_CLAMPED_ARRAY_MAP_INDEX, Map,                               \
-    rab_gsab_uint8_clamped_array_map)                                          \
   V(RAB_GSAB_BIGUINT64_ARRAY_MAP_INDEX, Map, rab_gsab_biguint64_array_map)     \
   V(RAB_GSAB_BIGINT64_ARRAY_MAP_INDEX, Map, rab_gsab_bigint64_array_map)       \
+  V(RAB_GSAB_UINT8_CLAMPED_ARRAY_MAP_INDEX, Map,                               \
+    rab_gsab_uint8_clamped_array_map)                                          \
+  V(RAB_GSAB_FLOAT32_ARRAY_MAP_INDEX, Map, rab_gsab_float32_array_map)         \
+  V(RAB_GSAB_FLOAT64_ARRAY_MAP_INDEX, Map, rab_gsab_float64_array_map)         \
   V(RAB_GSAB_FLOAT16_ARRAY_MAP_INDEX, Map, rab_gsab_float16_array_map)         \
   /* Below is alpha-sorted */                                                  \
   V(ABSTRACT_MODULE_SOURCE_FUNCTION_INDEX, JSFunction,                         \
@@ -203,6 +204,8 @@ enum ContextLookupFlags {
     js_array_template_literal_object_map)                                      \
   V(JS_DISPOSABLE_STACK_FUNCTION_INDEX, JSFunction,                            \
     js_disposable_stack_function)                                              \
+  V(JS_ASYNC_DISPOSABLE_STACK_FUNCTION_INDEX, JSFunction,                      \
+    js_async_disposable_stack_function)                                        \
   V(JS_DISPOSABLE_STACK_MAP_INDEX, Map, js_disposable_stack_map)               \
   V(JS_MAP_FUN_INDEX, JSFunction, js_map_fun)                                  \
   V(JS_MAP_MAP_INDEX, Map, js_map_map)                                         \
@@ -791,20 +794,15 @@ class NativeContext : public Context {
 
 class ScriptContextTableShape final : public AllStatic {
  public:
-  static constexpr int kElementSize = kTaggedSize;
   using ElementT = Context;
   using CompressionScheme = V8HeapCompressionScheme;
   static constexpr RootIndex kMapRootIndex = RootIndex::kScriptContextTableMap;
   static constexpr bool kLengthEqualsCapacity = false;
 
-#define FIELD_LIST(V)                                                   \
-  V(kCapacityOffset, kTaggedSize)                                       \
-  V(kLengthOffset, kTaggedSize)                                         \
-  V(kNamesToContextIndexOffset, kTaggedSize)                            \
-  V(kUnalignedHeaderSize, OBJECT_POINTER_PADDING(kUnalignedHeaderSize)) \
-  V(kHeaderSize, 0)
-  DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize, FIELD_LIST)
-#undef FIELD_LIST
+  V8_ARRAY_EXTRA_FIELDS({
+    TaggedMember<Smi> length_;
+    TaggedMember<NameToIndexHashTable> names_to_context_index_;
+  });
 };
 
 // A table of all script contexts. Every loaded top-level script with top-level
@@ -812,7 +810,6 @@ class ScriptContextTableShape final : public AllStatic {
 class ScriptContextTable
     : public TaggedArrayBase<ScriptContextTable, ScriptContextTableShape> {
   using Super = TaggedArrayBase<ScriptContextTable, ScriptContextTableShape>;
-  OBJECT_CONSTRUCTORS(ScriptContextTable, Super);
 
  public:
   using Shape = ScriptContextTableShape;
@@ -821,8 +818,13 @@ class ScriptContextTable
       Isolate* isolate, int capacity,
       AllocationType allocation = AllocationType::kYoung);
 
-  DECL_RELEASE_ACQUIRE_INT_ACCESSORS(length)
-  DECL_ACCESSORS(names_to_context_index, Tagged<NameToIndexHashTable>)
+  inline int length(AcquireLoadTag) const;
+  inline void set_length(int value, ReleaseStoreTag);
+
+  inline Tagged<NameToIndexHashTable> names_to_context_index() const;
+  inline void set_names_to_context_index(
+      Tagged<NameToIndexHashTable> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   inline Tagged<Context> get(int index) const;
   inline Tagged<Context> get(int index, AcquireLoadTag) const;
@@ -844,10 +846,6 @@ class ScriptContextTable
   DECL_VERIFIER(ScriptContextTable)
 
   class BodyDescriptor;
-
-  static constexpr int kLengthOffset = Shape::kLengthOffset;
-  static constexpr int kNamesToContextIndexOffset =
-      Shape::kNamesToContextIndexOffset;
 };
 
 using ContextField = Context::Field;

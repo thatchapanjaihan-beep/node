@@ -595,6 +595,8 @@ class InstructionSelectorT final : public Adapter {
   // users, and fusing is unlikely to improve performance.
   bool CanCover(node_t user, node_t node) const;
 
+  bool CanCoverProtectedLoad(node_t user, node_t node) const;
+
   // Used in pattern matching during code generation.
   // This function checks that {node} and {user} are in the same basic block,
   // and that {user} is the only user of {node} in this basic block.  This
@@ -685,6 +687,8 @@ class InstructionSelectorT final : public Adapter {
       UNREACHABLE();
     }
   }
+
+  void UpdateSourcePosition(Instruction* instruction, node_t node);
 
  private:
   friend class OperandGeneratorT<Adapter>;
@@ -892,6 +896,7 @@ class InstructionSelectorT final : public Adapter {
   DECLARE_GENERATOR_T(RoundFloat64ToInt32)
   DECLARE_GENERATOR_T(TruncateFloat64ToWord32)
   DECLARE_GENERATOR_T(TruncateFloat64ToFloat32)
+  DECLARE_GENERATOR_T(TruncateFloat64ToFloat16)
   DECLARE_GENERATOR_T(TruncateFloat32ToInt32)
   DECLARE_GENERATOR_T(TruncateFloat32ToUint32)
   DECLARE_GENERATOR_T(ChangeFloat64ToInt32)
@@ -1198,12 +1203,13 @@ class InstructionSelectorT final : public Adapter {
 
 #if V8_TARGET_ARCH_64_BIT
   bool ZeroExtendsWord32ToWord64(node_t node, int recursion_depth = 0);
+  void MarkNodeAsNotZeroExtended(node_t node);
   bool ZeroExtendsWord32ToWord64NoPhis(node_t node);
 
-  enum Upper32BitsState : uint8_t {
+  enum class Upper32BitsState : uint8_t {
     kNotYetChecked,
-    kUpperBitsGuaranteedZero,
-    kNoGuarantee,
+    kZero,
+    kMayBeNonZero,
   };
 #endif  // V8_TARGET_ARCH_64_BIT
 
@@ -1282,6 +1288,8 @@ class InstructionSelectorT final : public Adapter {
   std::optional<BitVector> additional_protected_instructions_;
 
 #if V8_TARGET_ARCH_64_BIT
+  size_t node_count_;
+
   // Holds lazily-computed results for whether phi nodes guarantee their upper
   // 32 bits to be zero. Indexed by node ID; nobody reads or writes the values
   // for non-phi nodes.

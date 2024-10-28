@@ -68,7 +68,6 @@ namespace internal {
   V(ClosureFeedbackCellArray)                 \
   V(Code)                                     \
   V(Context)                                  \
-  V(ExternalPointerArray)                     \
   V(ExternalString)                           \
   V(FeedbackMetadata)                         \
   V(FeedbackVector)                           \
@@ -109,7 +108,6 @@ namespace internal {
   V(BigIntWrapper)                              \
   V(Boolean)                                    \
   V(BooleanWrapper)                             \
-  V(ExternalPointerArray)                       \
   V(Callable)                                   \
   V(Cell)                                       \
   V(CompilationCacheTable)                      \
@@ -424,7 +422,7 @@ namespace internal {
   V(NonNullForeign)                          \
   V(ScriptContext)                           \
   V(WithContext)                             \
-  V(JSPrototype)                             \
+  V(JSInternalPrototypeBase)                 \
   V(JSObjectPrototype)                       \
   V(JSRegExpPrototype)                       \
   V(JSPromisePrototype)                      \

@@ -175,7 +175,7 @@ void CheckEquivalent(const WasmValue& lhs, const WasmValue& rhs,
           default:
             CHECK(lhs.type().heap_type().is_index());
             if (IsWasmNull(lhs_ref)) break;
-            uint32_t type_index = lhs.type().ref_index();
+            ModuleTypeIndex type_index = lhs.type().ref_index();
             if (module.has_signature(type_index)) {
               CHECK_EQ(lhs_ref, rhs_ref);
             } else if (module.has_struct(type_index)) {
@@ -205,7 +205,7 @@ void FuzzIt(base::Vector<const uint8_t> data) {
   // are saved as recursive groups as part of the type canonicalizer, but types
   // from previous runs just waste memory.
   GetTypeCanonicalizer()->EmptyStorageForTesting();
-  i_isolate->heap()->ClearWasmCanonicalRttsForTesting();
+  TypeCanonicalizer::ClearWasmCanonicalTypesForTesting(i_isolate);
 
   v8::HandleScope handle_scope(isolate);
   v8::Context::Scope context_scope(support->GetContext());

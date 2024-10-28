@@ -322,9 +322,18 @@ ExternalReference ExternalReference::trusted_pointer_table_base_address(
   return ExternalReference(isolate->trusted_pointer_table_base_address());
 }
 
+ExternalReference ExternalReference::shared_trusted_pointer_table_base_address(
+    Isolate* isolate) {
+  // TODO(saelo): maybe the external pointer table external references should
+  // also directly return the table base address?
+  return ExternalReference(
+      isolate->shared_trusted_pointer_table_base_address());
+}
+
 ExternalReference ExternalReference::code_pointer_table_address() {
   // TODO(saelo): maybe rename to code_pointer_table_base_address?
-  return ExternalReference(GetProcessWideCodePointerTable()->base_address());
+  return ExternalReference(
+      IsolateGroup::current()->code_pointer_table()->base_address());
 }
 
 ExternalReference ExternalReference::memory_chunk_metadata_table_address() {
@@ -478,7 +487,7 @@ FUNCTION_REFERENCE(delete_handle_scope_extensions,
                    HandleScope::DeleteExtensions)
 
 FUNCTION_REFERENCE(ephemeron_key_write_barrier_function,
-                   Heap::EphemeronKeyWriteBarrierFromCode)
+                   WriteBarrier::EphemeronKeyWriteBarrierFromCode)
 
 ExternalPointerHandle AllocateAndInitializeYoungExternalPointerTableEntry(
     Isolate* isolate, Address pointer) {
@@ -549,6 +558,9 @@ FUNCTION_REFERENCE(wasm_switch_to_the_central_stack_for_js,
                    wasm::switch_to_the_central_stack_for_js)
 FUNCTION_REFERENCE(wasm_switch_from_the_central_stack_for_js,
                    wasm::switch_from_the_central_stack_for_js)
+FUNCTION_REFERENCE(wasm_grow_stack, wasm::grow_stack)
+FUNCTION_REFERENCE(wasm_shrink_stack, wasm::shrink_stack)
+FUNCTION_REFERENCE(wasm_load_old_fp, wasm::load_old_fp)
 FUNCTION_REFERENCE(wasm_f32_trunc, wasm::f32_trunc_wrapper)
 FUNCTION_REFERENCE(wasm_f32_floor, wasm::f32_floor_wrapper)
 FUNCTION_REFERENCE(wasm_f32_ceil, wasm::f32_ceil_wrapper)
@@ -645,6 +657,8 @@ FUNCTION_REFERENCE(wasm_atomic_notify, futex_emulation_wake)
 void WasmSignatureCheckFail(Address raw_internal_function,
                             uintptr_t expected_hash) {
   // WasmInternalFunction::signature_hash doesn't exist in non-sandbox builds.
+  // TODO(saelo): Consider using Abort instead, as we do for JavaScript
+  // signature mismatches (See AbortReason::kJSSignatureMismatch).
 #if V8_ENABLE_SANDBOX
   Tagged<WasmInternalFunction> internal_function =
       Cast<WasmInternalFunction>(Tagged<Object>(raw_internal_function));
@@ -1010,13 +1024,13 @@ ExternalReference ExternalReference::invoke_accessor_getter_callback() {
 #define re_stack_check_func RegExpMacroAssemblerARM64::CheckStackGuardState
 #elif V8_TARGET_ARCH_ARM
 #define re_stack_check_func RegExpMacroAssemblerARM::CheckStackGuardState
-#elif V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+#elif V8_TARGET_ARCH_PPC64
 #define re_stack_check_func RegExpMacroAssemblerPPC::CheckStackGuardState
 #elif V8_TARGET_ARCH_MIPS64
 #define re_stack_check_func RegExpMacroAssemblerMIPS::CheckStackGuardState
 #elif V8_TARGET_ARCH_LOONG64
 #define re_stack_check_func RegExpMacroAssemblerLOONG64::CheckStackGuardState
-#elif V8_TARGET_ARCH_S390
+#elif V8_TARGET_ARCH_S390X
 #define re_stack_check_func RegExpMacroAssemblerS390::CheckStackGuardState
 #elif V8_TARGET_ARCH_RISCV32 || V8_TARGET_ARCH_RISCV64
 #define re_stack_check_func RegExpMacroAssemblerRISCV::CheckStackGuardState

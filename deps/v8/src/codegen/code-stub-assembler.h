@@ -48,6 +48,8 @@
 namespace v8 {
 namespace internal {
 
+#include "src/codegen/define-code-stub-assembler-macros.inc"
+
 class CallInterfaceDescriptor;
 class CodeStubArguments;
 class CodeStubAssembler;
@@ -55,102 +57,6 @@ class StatsCounter;
 class StubCache;
 
 enum class PrimitiveType { kBoolean, kNumber, kString, kSymbol };
-
-#ifdef DEBUG
-#define CSA_CHECK(csa, x) \
-  (csa)->Check([&]() -> TNode<BoolT> { return x; }, #x, __FILE__, __LINE__)
-#else
-#define CSA_CHECK(csa, x) (csa)->FastCheck(x)
-#endif
-
-#define CSA_CHECK_WITH_ABORT(csa, x) \
-  (csa)->Check([&]() -> TNode<BoolT> { return x; }, #x, __FILE__, __LINE__)
-
-// This is a check that always calls into the runtime if it aborts.
-// This also exits silently when --hole-fuzzing is enabled.
-#define CSA_HOLE_SECURITY_CHECK(csa, x) CSA_CHECK_WITH_ABORT(csa, x)
-
-#ifdef DEBUG
-// CSA_DCHECK_ARGS generates an
-// std::initializer_list<CodeStubAssembler::ExtraNode> from __VA_ARGS__. It
-// currently supports between 0 and 2 arguments.
-
-// clang-format off
-#define CSA_DCHECK_0_ARGS(...) {}
-#define CSA_DCHECK_1_ARG(a, ...) {{a, #a}}
-#define CSA_DCHECK_2_ARGS(a, b, ...) {{a, #a}, {b, #b}}
-// clang-format on
-#define SWITCH_CSA_DCHECK_ARGS(dummy, a, b, FUNC, ...) FUNC(a, b)
-#define CSA_DCHECK_ARGS(...)                                        \
-  CALL(SWITCH_CSA_DCHECK_ARGS, (, ##__VA_ARGS__, CSA_DCHECK_2_ARGS, \
-                                CSA_DCHECK_1_ARG, CSA_DCHECK_0_ARGS))
-// Workaround for MSVC to skip comma in empty __VA_ARGS__.
-#define CALL(x, y) x y
-
-// CSA_DCHECK(csa, <condition>, <extra values to print...>)
-
-#define CSA_DCHECK(csa, condition_node, ...)                         \
-  (csa)->Dcheck(condition_node, #condition_node, __FILE__, __LINE__, \
-                CSA_DCHECK_ARGS(__VA_ARGS__))
-
-// CSA_DCHECK_BRANCH(csa, [](Label* ok, Label* not_ok) {...},
-//     <extra values to print...>)
-
-#define CSA_DCHECK_BRANCH(csa, gen, ...) \
-  (csa)->Dcheck(gen, #gen, __FILE__, __LINE__, CSA_DCHECK_ARGS(__VA_ARGS__))
-
-#define CSA_DCHECK_JS_ARGC_OP(csa, Op, op, expected)                           \
-  (csa)->Dcheck(                                                               \
-      [&]() -> TNode<BoolT> {                                                  \
-        const TNode<Word32T> argc = (csa)->UncheckedParameter<Word32T>(        \
-            Descriptor::kJSActualArgumentsCount);                              \
-        return (csa)->Op(argc,                                                 \
-                         (csa)->Int32Constant(i::JSParameterCount(expected))); \
-      },                                                                       \
-      "argc " #op " " #expected, __FILE__, __LINE__,                           \
-      {{SmiFromInt32((csa)->UncheckedParameter<Int32T>(                        \
-            Descriptor::kJSActualArgumentsCount)),                             \
-        "argc"}})
-
-#define CSA_DCHECK_JS_ARGC_EQ(csa, expected) \
-  CSA_DCHECK_JS_ARGC_OP(csa, Word32Equal, ==, expected)
-
-#define CSA_DEBUG_INFO(name) \
-  { #name, __FILE__, __LINE__ }
-#define BIND(label) Bind(label, CSA_DEBUG_INFO(label))
-#define TYPED_VARIABLE_DEF(type, name, ...) \
-  TVariable<type> name(CSA_DEBUG_INFO(name), __VA_ARGS__)
-#define TYPED_VARIABLE_CONSTRUCTOR(name, ...) \
-  name(CSA_DEBUG_INFO(name), __VA_ARGS__)
-#else  // DEBUG
-#define CSA_DCHECK(csa, ...) ((void)0)
-#define CSA_DCHECK_BRANCH(csa, ...) ((void)0)
-#define CSA_DCHECK_JS_ARGC_EQ(csa, expected) ((void)0)
-#define BIND(label) Bind(label)
-#define TYPED_VARIABLE_DEF(type, name, ...) TVariable<type> name(__VA_ARGS__)
-#define TYPED_VARIABLE_CONSTRUCTOR(name, ...) name(__VA_ARGS__)
-#endif  // DEBUG
-
-#define TVARIABLE(...) EXPAND(TYPED_VARIABLE_DEF(__VA_ARGS__, this))
-#define TVARIABLE_CONSTRUCTOR(...) \
-  EXPAND(TYPED_VARIABLE_CONSTRUCTOR(__VA_ARGS__, this))
-
-#ifdef ENABLE_SLOW_DCHECKS
-#define CSA_SLOW_DCHECK(csa, ...)     \
-  if (v8_flags.enable_slow_asserts) { \
-    CSA_DCHECK(csa, __VA_ARGS__);     \
-  }
-#else
-#define CSA_SLOW_DCHECK(csa, ...) ((void)0)
-#endif
-
-// Similar to SBXCHECK in C++, these become a CSA_CHECK in sandbox-enabled
-// builds, otherwise a CSA_DCHECK.
-#ifdef V8_ENABLE_SANDBOX
-#define CSA_SBXCHECK(csa, ...) CSA_CHECK(csa, __VA_ARGS__)
-#else
-#define CSA_SBXCHECK(csa, ...) CSA_DCHECK(csa, __VA_ARGS__)
-#endif
 
 // Provides JavaScript-specific "macro-assembler" functionality on top of the
 // CodeAssembler. By factoring the JavaScript-isms out of the CodeAssembler,
@@ -737,8 +643,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void DCheckReceiver(ConvertReceiverMode mode, TNode<Object> receiver);
 
   // The following Call wrappers call an object according to the semantics that
-  // one finds in the EcmaScript spec, operating on an Callable (e.g. a
-  // JSFunction or proxy) rather than a InstructionStream object.
+  // one finds in the ECMAScript spec, operating on a Callable (e.g. a
+  // JSFunction or proxy) rather than an InstructionStream object.
   template <typename TCallable, class... TArgs>
   inline TNode<Object> Call(TNode<Context> context, TNode<TCallable> callable,
                             ConvertReceiverMode mode, TNode<Object> receiver,
@@ -787,9 +693,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                         TNode<JSReceiver> target,
                                         TNode<JSReceiver> new_target,
                                         TArgs... args) {
-    return CAST(ConstructJSWithTarget(Builtin::kConstruct, context, target,
-                                      new_target,
-                                      implicit_cast<TNode<Object>>(args)...));
+    return CAST(ConstructJS(Builtin::kConstruct, context, target, new_target,
+                            implicit_cast<TNode<Object>>(args)...));
   }
   template <class... TArgs>
   TNode<JSReceiver> Construct(TNode<Context> context,
@@ -1086,6 +991,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TNode<JSDispatchHandleT> handle);
 #endif
 
+  TNode<JSDispatchHandleT> InvalidDispatchHandleConstant();
+
   TNode<Object> LoadProtectedPointerField(TNode<TrustedObject> object,
                                           TNode<IntPtrT> offset) {
     return CAST(LoadProtectedPointerFromObject(
@@ -1136,9 +1043,10 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
 #if V8_ENABLE_WEBASSEMBLY
   // Returns WasmTrustedInstanceData|Smi.
-  TNode<Object> LoadInstanceDataFromWasmImportData(TNode<WasmImportData> ref) {
+  TNode<Object> LoadInstanceDataFromWasmImportData(
+      TNode<WasmImportData> import_data) {
     return LoadProtectedPointerField(
-        ref, WasmImportData::kProtectedInstanceDataOffset);
+        import_data, WasmImportData::kProtectedInstanceDataOffset);
   }
 
   // Returns WasmImportData or WasmTrustedInstanceData.
@@ -1407,8 +1315,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   // Load the length of a fixed array base instance.
   TNode<Smi> LoadFixedArrayBaseLength(TNode<FixedArrayBase> array);
   template <typename Array>
-  TNode<Smi> LoadArrayCapacity(TNode<Array> array) {
-    return LoadObjectField<Smi>(array, Array::Shape::kCapacityOffset);
+  TNode<Smi> LoadSmiArrayLength(TNode<Array> array) {
+    return LoadObjectField<Smi>(array, offsetof(Array, length_));
   }
   // Load the length of a fixed array base instance.
   TNode<IntPtrT> LoadAndUntagFixedArrayBaseLength(TNode<FixedArrayBase> array);
@@ -1581,7 +1489,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   TNode<typename Array::Shape::ElementT> LoadArrayElement(
       TNode<Array> array, TNode<TIndex> index, int additional_offset = 0) {
     return LoadArrayElement<Array, TIndex, typename Array::Shape::ElementT>(
-        array, Array::Shape::kHeaderSize, index, additional_offset);
+        array, OFFSET_OF_DATA_START(Array), index, additional_offset);
   }
 
   template <typename TIndex>
@@ -1933,7 +1841,7 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
     // StoreFixedArrayOrPropertyArrayElement. We can make it more robust and
     // generic if needed.
     TNode<IntPtrT> offset = ElementOffsetFromIndex(index, PACKED_ELEMENTS,
-                                                   Array::Shape::kHeaderSize);
+                                                   OFFSET_OF_DATA_START(Array));
     if (barrier_mode == SKIP_WRITE_BARRIER) {
       StoreObjectFieldNoWriteBarrier(object, offset, value);
     } else if (barrier_mode == UPDATE_WRITE_BARRIER) {
@@ -3916,7 +3824,8 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   template <typename TIndex>
   TNode<IntPtrT> GetFixedArrayAllocationSize(TNode<TIndex> element_count,
                                              ElementsKind kind) {
-    return GetArrayAllocationSize(element_count, kind, FixedArray::kHeaderSize);
+    return GetArrayAllocationSize(element_count, kind,
+                                  OFFSET_OF_DATA_START(FixedArray));
   }
 
   TNode<IntPtrT> GetPropertyArrayAllocationSize(TNode<IntPtrT> element_count) {
@@ -4156,9 +4065,9 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                                         int base_size = 0);
   template <typename Array, typename TIndex>
   TNode<IntPtrT> OffsetOfElementAt(TNode<TIndex> index) {
-    static_assert(Array::Shape::kElementSize == kTaggedSize);
+    static_assert(Array::kElementSize == kTaggedSize);
     return ElementOffsetFromIndex(index, PACKED_ELEMENTS,
-                                  Array::kHeaderSize - kHeapObjectTag);
+                                  OFFSET_OF_DATA_START(Array) - kHeapObjectTag);
   }
 
   // Check that a field offset is within the bounds of the an object.
@@ -4171,13 +4080,38 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
 
 #ifdef V8_ENABLE_LEAPTIERING
   // Load a builtin's handle into the JSDispatchTable.
-  TNode<JSDispatchHandleT> LoadBuiltinDispatchHandle(Builtin builtin);
-  TNode<JSDispatchHandleT> LoadBuiltinDispatchHandle(RootIndex idx);
-  TNode<JSDispatchHandleT> LoadBuiltinDispatchHandle(TNode<Smi> builtin_id);
+  TNode<JSDispatchHandleT> LoadBuiltinDispatchHandle(
+      JSBuiltinDispatchHandleRoot::Idx dispatch_root_idx);
+  inline TNode<JSDispatchHandleT> LoadBuiltinDispatchHandle(RootIndex idx) {
+    return LoadBuiltinDispatchHandle(JSBuiltinDispatchHandleRoot::to_idx(idx));
+  }
 
-  // Load a Code object from the JSDispatchTable.
-  TNode<Code> ResolveJSDispatchHandle(TNode<JSDispatchHandleT> dispatch_handle);
+  // Load the Code object of a JSDispatchTable entry.
+  TNode<Code> LoadCodeObjectFromJSDispatchTable(
+      TNode<JSDispatchHandleT> dispatch_handle);
+  // Load the parameter count of a JSDispatchTable entry.
+  TNode<Uint16T> LoadParameterCountFromJSDispatchTable(
+      TNode<JSDispatchHandleT> dispatch_handle);
 #endif
+
+  // Indicate that this code must support a dynamic parameter count.
+  //
+  // This is used for builtins that must work on functions with different
+  // parameter counts. In that case, the true JS parameter count is only known
+  // at runtime and must be obtained in order to compute the total number of
+  // arguments (which may include padding arguments). The parameter count is
+  // subsequently available through the corresponding CodeAssembler accessors.
+  // The target function object and the dispatch handle need to be passed in
+  // and are used to obtain the actual parameter count of the called function.
+  //
+  // This should generally be invoked directly at the start of the function.
+  //
+  // TODO(saelo): it would be a bit nicer if this would happen automatically in
+  // the function prologue for functions marked as requiring this (e.g. via the
+  // call descriptor). It's not clear if that's worth the effort though for the
+  // handful of builtins that need this.
+  void SetSupportsDynamicParameterCount(
+      TNode<JSFunction> callee, TNode<JSDispatchHandleT> dispatch_handle);
 
   // Figure out the SFI's code object using its data field.
   // If |data_type_out| is provided, the instance type of the function data will
@@ -4190,26 +4124,15 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
       TVariable<Uint16T>* data_type_out = nullptr,
       Label* if_compile_lazy = nullptr);
 
-  TNode<JSFunction> AllocateFunctionWithContext(
-      TNode<SharedFunctionInfo> shared_info,
-#ifdef V8_ENABLE_LEAPTIERING
-      TNode<JSDispatchHandleT> dispatch_handle,
-#endif
-      TNode<Context> context);
-  TNode<JSFunction> AllocateRootFunctionWithContext(RootIndex function,
-                                                    TNode<Context> context) {
-    return AllocateFunctionWithContext(
-        UncheckedCast<SharedFunctionInfo>(LoadRoot(function)),
-#ifdef V8_ENABLE_LEAPTIERING
-        LoadBuiltinDispatchHandle(function),
-#endif
-        context);
-  }
+  TNode<JSFunction> AllocateRootFunctionWithContext(
+      RootIndex function, TNode<Context> context,
+      std::optional<TNode<NativeContext>> maybe_native_context);
   // Used from Torque because Torque
-  TNode<JSFunction> AllocateRootFunctionWithContext(intptr_t function,
-                                                    TNode<Context> context) {
+  TNode<JSFunction> AllocateRootFunctionWithContext(
+      intptr_t function, TNode<Context> context,
+      TNode<NativeContext> native_context) {
     return AllocateRootFunctionWithContext(static_cast<RootIndex>(function),
-                                           context);
+                                           context, native_context);
   }
 
   // Promise helpers
@@ -4601,15 +4524,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
                               TNode<Uint8T> property_details,
                               Label* needs_resize);
 
-  // If the current code is running on a secondary stack, move the stack pointer
-  // to the central stack (but not the frame pointer) and adjust the stack
-  // limit. Returns the old stack pointer, or nullptr if no switch was
-  // performed.
-  TNode<RawPtrT> SwitchToTheCentralStackIfNeeded();
-  // Switch the SP back to the secondary stack after switching to the central
-  // stack.
-  void SwitchFromTheCentralStack(TNode<RawPtrT> old_sp);
-
   TNode<BoolT> IsMarked(TNode<Object> object);
 
   void GetMarkBit(TNode<IntPtrT> object, TNode<IntPtrT>* cell,
@@ -4786,8 +4700,6 @@ class V8_EXPORT_PRIVATE CodeStubAssembler
   void EmitElementStoreTypedArrayUpdateValue(
       TNode<Object> value, ElementsKind elements_kind,
       TNode<TValue> converted_value, TVariable<Object>* maybe_converted_value);
-
-  TNode<RawPtrT> SwitchToTheCentralStack();
 };
 
 class V8_EXPORT_PRIVATE CodeStubArguments {
@@ -4808,6 +4720,9 @@ class V8_EXPORT_PRIVATE CodeStubArguments {
         argc_(torque_arguments.actual_count),
         base_(torque_arguments.base),
         fp_(torque_arguments.frame) {}
+
+  // Return true if there may be additional padding arguments, false otherwise.
+  bool MayHavePaddingArguments() const;
 
   TNode<Object> GetReceiver() const;
   // Replaces receiver argument on the expression stack. Should be used only
@@ -4964,9 +4879,12 @@ DEFINE_OPERATORS_FOR_FLAGS(CodeStubAssembler::AllocationFlags)
   inline TNode<Map> CodeStubAssembler::GetClassMapConstant<class_name>() { \
     return class_name##MapConstant();                                      \
   }
-
 UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(CLASS_MAP_CONSTANT_ADAPTER, _)
+#undef CLASS_MAP_CONSTANT_ADAPTER
+
+#include "src/codegen/undef-code-stub-assembler-macros.inc"
 
 }  // namespace internal
 }  // namespace v8
+
 #endif  // V8_CODEGEN_CODE_STUB_ASSEMBLER_H_

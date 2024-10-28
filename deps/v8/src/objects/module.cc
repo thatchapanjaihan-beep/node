@@ -144,7 +144,13 @@ void Module::ResetGraph(Isolate* isolate, Handle<Module> module) {
     if (IsModule(*descendant)) {
       ResetGraph(isolate, Cast<Module>(descendant));
     } else {
+      // The requested module is either an undefined or a WasmModule object.
+#if V8_ENABLE_WEBASSEMBLY
+      DCHECK(IsUndefined(*descendant, isolate) ||
+             IsWasmModuleObject(*descendant));
+#else
       DCHECK(IsUndefined(*descendant, isolate));
+#endif
     }
   }
 }
@@ -199,12 +205,14 @@ MaybeHandle<Cell> Module::ResolveExport(Isolate* isolate, Handle<Module> module,
 
 bool Module::Instantiate(Isolate* isolate, Handle<Module> module,
                          v8::Local<v8::Context> context,
-                         v8::Module::ResolveModuleCallback callback) {
+                         v8::Module::ResolveModuleCallback module_callback,
+                         v8::Module::ResolveSourceCallback source_callback) {
 #ifdef DEBUG
   PrintStatusMessage(*module, "Instantiating module ");
 #endif  // DEBUG
 
-  if (!PrepareInstantiate(isolate, module, context, callback)) {
+  if (!PrepareInstantiate(isolate, module, context, module_callback,
+                          source_callback)) {
     ResetGraph(isolate, module);
     DCHECK_EQ(module->status(), kUnlinked);
     return false;
@@ -223,9 +231,10 @@ bool Module::Instantiate(Isolate* isolate, Handle<Module> module,
   return true;
 }
 
-bool Module::PrepareInstantiate(Isolate* isolate, Handle<Module> module,
-                                v8::Local<v8::Context> context,
-                                v8::Module::ResolveModuleCallback callback) {
+bool Module::PrepareInstantiate(
+    Isolate* isolate, Handle<Module> module, v8::Local<v8::Context> context,
+    v8::Module::ResolveModuleCallback module_callback,
+    v8::Module::ResolveSourceCallback source_callback) {
   DCHECK_NE(module->status(), kEvaluating);
   DCHECK_NE(module->status(), kLinking);
   if (module->status() >= kPreLinking) return true;
@@ -234,7 +243,8 @@ bool Module::PrepareInstantiate(Isolate* isolate, Handle<Module> module,
 
   if (IsSourceTextModule(*module)) {
     return SourceTextModule::PrepareInstantiate(
-        isolate, Cast<SourceTextModule>(module), context, callback);
+        isolate, Cast<SourceTextModule>(module), context, module_callback,
+        source_callback);
   } else {
     return SyntheticModule::PrepareInstantiate(
         isolate, Cast<SyntheticModule>(module), context);
@@ -327,7 +337,7 @@ Handle<JSModuleNamespace> Module::GetModuleNamespace(Isolate* isolate,
   }
 
   DirectHandle<ObjectHashTable> exports(module->exports(), isolate);
-  ZoneVector<Handle<String>> names(&zone);
+  ZoneVector<IndirectHandle<String>> names(&zone);
   names.reserve(exports->NumberOfElements());
   for (InternalIndex i : exports->IterateEntries()) {
     Tagged<Object> key;
@@ -338,7 +348,7 @@ Handle<JSModuleNamespace> Module::GetModuleNamespace(Isolate* isolate,
 
   // Sort them alphabetically.
   std::sort(names.begin(), names.end(),
-            [&isolate](Handle<String> a, Handle<String> b) {
+            [&isolate](IndirectHandle<String> a, IndirectHandle<String> b) {
               return String::Compare(isolate, a, b) ==
                      ComparisonResult::kLessThan;
             });

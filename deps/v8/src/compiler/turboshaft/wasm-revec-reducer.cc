@@ -228,6 +228,37 @@ void SLPTree::Print(const char* info) {
           node_to_packnode_);
 }
 
+bool SLPTree::HasInputDependencies(const NodeGroup& node_group) {
+  DCHECK_EQ(node_group.size(), 2);
+  if (node_group[0] == node_group[1]) return false;
+  OpIndex start, end;
+  if (node_group[0] < node_group[1]) {
+    start = node_group[0];
+    end = node_group[1];
+  } else {
+    start = node_group[1];
+    end = node_group[0];
+  }
+  // Do BFS from the end node and see if there is a path to the start node.
+  ZoneQueue<OpIndex> to_visit(phase_zone_);
+  to_visit.push(end);
+  while (!to_visit.empty()) {
+    OpIndex to_visit_node = to_visit.front();
+    Operation& op = graph_.Get(to_visit_node);
+    to_visit.pop();
+    for (OpIndex input : op.inputs()) {
+      if (input == start) {
+        return true;
+      } else if (input > start) {
+        // We should ensure that there is no back edge.
+        DCHECK_LT(input, to_visit_node);
+        to_visit.push(input);
+      }
+    }
+  }
+  return false;
+}
+
 PackNode* SLPTree::NewPackNode(const NodeGroup& node_group) {
   TRACE("PackNode %s(#%d, #%d)\n",
         GetSimdOpcodeName(graph_.Get(node_group[0])).c_str(),
@@ -242,39 +273,27 @@ PackNode* SLPTree::NewPackNode(const NodeGroup& node_group) {
 PackNode* SLPTree::NewForcePackNode(const NodeGroup& node_group,
                                     PackNode::ForcePackType type,
                                     const Graph& graph) {
+  // Currently we only support force packing two nodes.
+  DCHECK_EQ(node_group.size(), 2);
+  // We should guarantee that the one node in the NodeGroup does not rely on the
+  // result of the other. Because it is costly to force pack such candidates.
+  // For example, we have four nodes {A, B, C, D} which are connected by input
+  // edges: A <-- B <-- C <-- D. If {B} and {D} are already packed into a
+  // PackNode and we want to force pack {A} and {C}, we need to duplicate {B}
+  // and the result will be {A, B, C}, {B, D}. This increase the cost of
+  // ForcePack so currently we do not support it.
+  if (HasInputDependencies(node_group)) {
+    TRACE("ForcePackNode %s(#%d, #%d) failed due to input dependencies.\n",
+          GetSimdOpcodeName(graph_.Get(node_group[0])).c_str(),
+          node_group[0].id(), node_group[1].id());
+    return nullptr;
+  }
+
   TRACE("ForcePackNode %s(#%d, #%d)\n",
         GetSimdOpcodeName(graph_.Get(node_group[0])).c_str(),
         node_group[0].id(), node_group[1].id());
   PackNode* pnode = NewPackNode(node_group);
   pnode->set_force_pack_type(type);
-  if (type == PackNode::ForcePackType::kGeneral) {
-    // Collect all the operations on right node's input tree, whose OpIndex is
-    // bigger than the left node. The traversal should be done in a BFS manner
-    // to make sure all inputs are emitted before the use.
-    DCHECK(pnode->force_pack_right_inputs().empty());
-    ZoneVector<OpIndex> idx_vec(phase_zone_);
-    const Operation& right_op = graph.Get(node_group[1]);
-    for (OpIndex input : right_op.inputs()) {
-      DCHECK_NE(input, node_group[0]);
-      DCHECK_LT(input, node_group[1]);
-      if (input > node_group[0]) {
-        idx_vec.push_back(input);
-      }
-    }
-    size_t idx = 0;
-    while (idx < idx_vec.size()) {
-      const Operation& op = graph.Get(idx_vec[idx]);
-      for (OpIndex input : op.inputs()) {
-        DCHECK_NE(input, node_group[0]);
-        DCHECK_LT(input, node_group[1]);
-        if (input > node_group[0]) {
-          idx_vec.push_back(input);
-        }
-      }
-      idx++;
-    }
-    pnode->force_pack_right_inputs().insert(idx_vec.begin(), idx_vec.end());
-  }
   return pnode;
 }
 
@@ -641,11 +660,9 @@ PackNode* SLPTree::BuildTreeRec(const NodeGroup& node_group,
       StoreLoadInfo<LoadOp> info1(&graph_, &load1);
       auto stride = info1 - info0;
       if (stride.has_value()) {
-        const int value = stride.value();
-        if (value == kSimd128Size) {
+        if (const int value = stride.value(); value == kSimd128Size) {
           // TODO(jiepan) Sort load
-          PackNode* p = NewPackNode(node_group);
-          return p;
+          return NewPackNode(node_group);
         } else if (value == 0) {
           return NewForcePackNode(node_group, PackNode::ForcePackType::kSplat,
                                   graph_);
@@ -1033,15 +1050,24 @@ bool WasmRevecAnalyzer::DecideVectorize() {
   int save = 0, cost = 0;
   ForEach(
       [&](PackNode const* pnode) {
-        const NodeGroup& nodes = pnode->Nodes();
-        // Splat nodes will not cause a saving as it simply extends itself.
-        if (!IsSplat(nodes)) {
-          save++;
+        const NodeGroup& nodes = pnode->nodes();
+        // An additional store is emitted in case of OOB trap at the higher
+        // 128-bit address. Thus no save if the store at lower address is
+        // executed first. Return directly as we dont need to check external use
+        // for stores.
+        if (graph_.Get(nodes[0]).opcode == Opcode::kStore) {
+          if (nodes[0] > nodes[1]) save++;
+          return;
         }
 
         if (pnode->is_force_pack()) {
-          cost += 2;
+          cost++;
           return;
+        }
+
+        // Splat nodes will not cause a saving as it simply extends itself.
+        if (!IsSplat(nodes)) {
+          save++;
         }
 
 #ifdef V8_TARGET_ARCH_X64
@@ -1055,11 +1081,11 @@ bool WasmRevecAnalyzer::DecideVectorize() {
 #endif  // V8_TARGET_ARCH_X64
 
           for (auto use : use_map_->uses(nodes[i])) {
-            if (!GetPackNode(use)) {
+            if (!GetPackNode(use) || GetPackNode(use)->is_force_pack()) {
               TRACE("External use edge: (%d:%s) -> (%d:%s)\n", use.id(),
                     OpcodeName(graph_.Get(use).opcode), nodes[i].id(),
                     OpcodeName(graph_.Get(nodes[i]).opcode));
-              cost++;
+              ++cost;
 
               // We only need one Extract node and all other uses can share.
               break;

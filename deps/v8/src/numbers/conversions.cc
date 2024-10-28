@@ -23,6 +23,11 @@
 #include "src/strings/char-predicates-inl.h"
 #include "src/utils/allocation.h"
 
+#define FASTFLOAT_ALLOWS_LEADING_PLUS
+
+#include "third_party/fast_float/src/include/fast_float/fast_float.h"
+#include "third_party/fast_float/src/include/fast_float/float_common.h"
+
 #if defined(_STLP_VENDOR_CSTD)
 // STLPort doesn't import fpclassify into the std namespace.
 #define FPCLASSIFY_NAMESPACE
@@ -689,197 +694,63 @@ double InternalStringToDouble(const Char* current, const Char* end,
 
   // From here we are parsing a StrDecimalLiteral, as per
   // https://tc39.es/ecma262/#sec-tonumber-applied-to-the-string-type
-
   const bool allow_trailing_junk = flag == ALLOW_TRAILING_JUNK;
 
-  // Maximum number of significant digits in decimal representation.
-  // The longest possible double in decimal representation is
-  // (2^53 - 1) * 2 ^ -1074 that is (2 ^ 53 - 1) * 5 ^ 1074 / 10 ^ 1074
-  // (768 digits). If we parse a number whose first digits are equal to a
-  // mean of 2 adjacent doubles (that could have up to 769 digits) the result
-  // must be rounded to the bigger one unless the tail consists of zeros, so
-  // we don't need to preserve all the digits.
-  const int kMaxSignificantDigits = 772;
-
-  // The longest form of simplified number is: "-<significant digits>'.1eXXX\0".
-  const int kBufferSize = kMaxSignificantDigits + 10;
-  char buffer[kBufferSize];
-  int buffer_pos = 0;
-
-  // Exponent will be adjusted if insignificant digits of the integer part
-  // or insignificant leading zeros of the fractional part are dropped.
-  int exponent = 0;
-  int significant_digits = 0;
-  int insignificant_digits = 0;
-  bool nonzero_digit_dropped = false;
-
-  enum class Sign { kNone, kNegative, kPositive };
-
-  Sign sign = Sign::kNone;
-
-  if (*current == '+') {
-    // Ignore leading sign.
-    ++current;
-    if (current == end) return JunkStringValue();
-    sign = Sign::kPositive;
-  } else if (*current == '-') {
-    ++current;
-    if (current == end) return JunkStringValue();
-    sign = Sign::kNegative;
-  }
-
-  static const char kInfinityString[] = "Infinity";
-  if (*current == kInfinityString[0]) {
-    if (!SubStringEquals(&current, end, kInfinityString)) {
-      return JunkStringValue();
-    }
-
+  double value;
+  // fast_float takes a char/char16_t instead of a uint8_t/uint16_t. Cast the
+  // pointers to match.
+  using UC = std::conditional_t<std::is_same_v<Char, uint8_t>, char, char16_t>;
+  static_assert(sizeof(UC) == sizeof(Char));
+  const UC* current_uc = reinterpret_cast<const UC*>(current);
+  const UC* end_uc = reinterpret_cast<const UC*>(end);
+  auto ret = fast_float::from_chars(current_uc, end_uc, value,
+                                    static_cast<fast_float::chars_format>(
+                                        fast_float::chars_format::general |
+                                        fast_float::chars_format::no_infnan));
+  if (ret.ptr == end_uc) return value;
+  if (ret.ptr > current_uc) {
+    current = reinterpret_cast<const Char*>(ret.ptr);
     if (!allow_trailing_junk && AdvanceToNonspace(&current, end)) {
       return JunkStringValue();
     }
-
-    DCHECK_EQ(buffer_pos, 0);
-    return (sign == Sign::kNegative) ? -V8_INFINITY : V8_INFINITY;
+    return value;
   }
 
-  // Ignore leading zeros in the integer part.
-  bool leading_zero = false;
-  if (*current == '0') {
-    do {
-      current++;
-      if (current == end) return SignedZero(sign == Sign::kNegative);
-    } while (*current == '0');
-    leading_zero = true;
-  }
-
-  // Copy significant digits of the integer part (if any) to the buffer.
-  while (*current >= '0' && *current <= '9') {
-    if (significant_digits < kMaxSignificantDigits) {
-      DCHECK_LT(buffer_pos, kBufferSize);
-      buffer[buffer_pos++] = static_cast<char>(*current);
-      significant_digits++;
-      // Will later check if it's an octal in the buffer.
-    } else {
-      insignificant_digits++;  // Move the digit into the exponential part.
-      nonzero_digit_dropped = nonzero_digit_dropped || *current != '0';
-    }
-    ++current;
-    if (current == end) goto parsing_done;
-  }
-
-  if (*current == '.') {
-    ++current;
-    if (current == end) {
-      if (significant_digits == 0 && !leading_zero) {
-        return JunkStringValue();
-      } else {
-        goto parsing_done;
-      }
-    }
-
-    if (significant_digits == 0) {
-      // octal = false;
-      // Integer part consists of 0 or is absent. Significant digits start after
-      // leading zeros (if any).
-      while (*current == '0') {
-        ++current;
-        if (current == end) return SignedZero(sign == Sign::kNegative);
-        exponent--;  // Move this 0 into the exponent.
-      }
-    }
-
-    // There is a fractional part.  We don't emit a '.', but adjust the exponent
-    // instead.
-    while (*current >= '0' && *current <= '9') {
-      if (significant_digits < kMaxSignificantDigits) {
-        DCHECK_LT(buffer_pos, kBufferSize);
-        buffer[buffer_pos++] = static_cast<char>(*current);
-        significant_digits++;
-        exponent--;
-      } else {
-        // Ignore insignificant digits in the fractional part.
-        nonzero_digit_dropped = nonzero_digit_dropped || *current != '0';
-      }
+  // Failed to parse any number -- handle ±Infinity before giving up.
+  DCHECK_EQ(ret.ptr, current_uc);
+  DCHECK_NE(current, end);
+  static constexpr char kInfinityString[] = "Infinity";
+  switch (*current) {
+    case '+':
+      // Ignore leading plus sign.
       ++current;
-      if (current == end) goto parsing_done;
-    }
-  }
-
-  if (!leading_zero && exponent == 0 && significant_digits == 0) {
-    // If leading_zeros is true then the string contains zeros.
-    // If exponent < 0 then string was [+-]\.0*...
-    // If significant_digits != 0 the string is not equal to 0.
-    // Otherwise there are no digits in the string.
-    return JunkStringValue();
-  }
-
-  // Parse exponential part.
-  if (*current == 'e' || *current == 'E') {
-    ++current;
-    if (current == end) {
-      if (allow_trailing_junk) {
-        goto parsing_done;
-      } else {
+      if (current == end) return JunkStringValue();
+      if (*current != kInfinityString[0]) return JunkStringValue();
+      [[fallthrough]];
+    case kInfinityString[0]:
+      if (!SubStringEquals(&current, end, kInfinityString)) {
         return JunkStringValue();
       }
-    }
-    char exponent_sign = '+';
-    if (*current == '+' || *current == '-') {
-      exponent_sign = static_cast<char>(*current);
-      ++current;
-      if (current == end) {
-        if (allow_trailing_junk) {
-          goto parsing_done;
-        } else {
-          return JunkStringValue();
-        }
-      }
-    }
-
-    if (current == end || *current < '0' || *current > '9') {
-      if (allow_trailing_junk) {
-        goto parsing_done;
-      } else {
+      if (!allow_trailing_junk && AdvanceToNonspace(&current, end)) {
         return JunkStringValue();
       }
-    }
+      return V8_INFINITY;
 
-    const int max_exponent = INT_MAX / 2;
-    DCHECK(-max_exponent / 2 <= exponent && exponent <= max_exponent / 2);
-    int num = 0;
-    do {
-      // Check overflow.
-      int digit = *current - '0';
-      if (num >= max_exponent / 10 &&
-          !(num == max_exponent / 10 && digit <= max_exponent % 10)) {
-        num = max_exponent;
-      } else {
-        num = num * 10 + digit;
-      }
+    case '-':
       ++current;
-    } while (current != end && *current >= '0' && *current <= '9');
+      if (current == end) return JunkStringValue();
+      if (*current != kInfinityString[0]) return JunkStringValue();
+      if (!SubStringEquals(&current, end, kInfinityString)) {
+        return JunkStringValue();
+      }
+      if (!allow_trailing_junk && AdvanceToNonspace(&current, end)) {
+        return JunkStringValue();
+      }
+      return -V8_INFINITY;
 
-    exponent += (exponent_sign == '-' ? -num : num);
+    default:
+      return JunkStringValue();
   }
-
-  if (!allow_trailing_junk && AdvanceToNonspace(&current, end)) {
-    return JunkStringValue();
-  }
-
-parsing_done:
-  exponent += insignificant_digits;
-
-  if (nonzero_digit_dropped) {
-    buffer[buffer_pos++] = '1';
-    exponent--;
-  }
-
-  SLOW_DCHECK(buffer_pos < kBufferSize);
-  buffer[buffer_pos] = '\0';
-
-  double converted =
-      Strtod(base::Vector<const char>(buffer, buffer_pos), exponent);
-  return (sign == Sign::kNegative) ? -converted : converted;
 }
 
 double StringToDouble(const char* str, ConversionFlag flags,
@@ -898,8 +769,8 @@ double StringToDouble(base::Vector<const uint8_t> str, ConversionFlag flags,
 
 double StringToDouble(base::Vector<const base::uc16> str, ConversionFlag flags,
                       double empty_string_val) {
-  const base::uc16* end = str.begin() + str.length();
-  return InternalStringToDouble(str.begin(), end, flags, empty_string_val);
+  return InternalStringToDouble(str.begin(), str.end(), flags,
+                                empty_string_val);
 }
 
 double BinaryStringToDouble(base::Vector<const uint8_t> str) {
@@ -1000,7 +871,7 @@ class StringToBigIntHelper : public StringToIntHelper {
     base::SmallVector<bigint::digit_t, 8> digit_storage(num_digits);
     bigint::RWDigits digits(digit_storage.data(), num_digits);
     processor->FromString(digits, &accumulator_);
-    int num_chars = bigint::ToStringResultLength(digits, 10, false);
+    uint32_t num_chars = bigint::ToStringResultLength(digits, 10, false);
     std::unique_ptr<char[]> out(new char[num_chars + 1]);
     processor->ToString(out.get(), &num_chars, digits, 10, false);
     out[num_chars] = '\0';
@@ -1466,9 +1337,9 @@ double FlatStringToDouble(Tagged<String> string, ConversionFlag flag,
 
 std::optional<double> TryStringToDouble(LocalIsolate* isolate,
                                         DirectHandle<String> object,
-                                        int max_length_for_conversion) {
+                                        uint32_t max_length_for_conversion) {
   DisallowGarbageCollection no_gc;
-  int length = object->length();
+  uint32_t length = object->length();
   if (length > max_length_for_conversion) {
     return std::nullopt;
   }
@@ -1483,8 +1354,8 @@ std::optional<double> TryStringToDouble(LocalIsolate* isolate,
 std::optional<double> TryStringToInt(LocalIsolate* isolate,
                                      DirectHandle<String> object, int radix) {
   DisallowGarbageCollection no_gc;
-  const int kMaxLengthForConversion = 20;
-  int length = object->length();
+  const uint32_t kMaxLengthForConversion = 20;
+  uint32_t length = object->length();
   if (length > kMaxLengthForConversion) {
     return std::nullopt;
   }
@@ -1514,14 +1385,14 @@ bool IsSpecialIndex(Tagged<String> string) {
 bool IsSpecialIndex(Tagged<String> string,
                     SharedStringAccessGuardIfNeeded& access_guard) {
   // Max length of canonical double: -X.XXXXXXXXXXXXXXXXX-eXXX
-  const int kBufferSize = 24;
-  const int length = string->length();
+  const uint32_t kBufferSize = 24;
+  const uint32_t length = string->length();
   if (length == 0 || length > kBufferSize) return false;
   uint16_t buffer[kBufferSize];
   String::WriteToFlat(string, buffer, 0, length, access_guard);
   // If the first char is not a digit or a '-' or we can't match 'NaN' or
   // '(-)Infinity', bailout immediately.
-  int offset = 0;
+  uint32_t offset = 0;
   if (!IsDecimalDigit(buffer[0])) {
     if (buffer[0] == '-') {
       if (length == 1) return false;  // Just '-' is bad.
@@ -1543,9 +1414,9 @@ bool IsSpecialIndex(Tagged<String> string,
     }
   }
   // Expected fast path: key is an integer.
-  static const int kRepresentableIntegerLength = 15;  // (-)XXXXXXXXXXXXXXX
+  static const uint32_t kRepresentableIntegerLength = 15;  // (-)XXXXXXXXXXXXXXX
   if (length - offset <= kRepresentableIntegerLength) {
-    const int initial_offset = offset;
+    const uint32_t initial_offset = offset;
     bool matches = true;
     for (; offset < length; offset++) {
       matches &= IsDecimalDigit(buffer[offset]);
@@ -1564,7 +1435,7 @@ bool IsSpecialIndex(Tagged<String> string,
   char reverse_buffer[kBufferSize + 1];  // Result will be /0 terminated.
   base::Vector<char> reverse_vector(reverse_buffer, arraysize(reverse_buffer));
   const char* reverse_string = DoubleToCString(d, reverse_vector);
-  for (int i = 0; i < length; ++i) {
+  for (uint32_t i = 0; i < length; ++i) {
     if (static_cast<uint16_t>(reverse_string[i]) != buffer[i]) return false;
   }
   return true;

@@ -294,34 +294,33 @@ Node* WasmGraphAssembler::LoadWasmTypeInfo(Node* map) {
 Node* WasmGraphAssembler::LoadFixedArrayLengthAsSmi(Node* fixed_array) {
   return LoadImmutableFromObject(
       MachineType::TaggedSigned(), fixed_array,
-      wasm::ObjectAccess::ToTagged(FixedArray::kLengthOffset));
+      wasm::ObjectAccess::ToTagged(offsetof(FixedArray, length_)));
 }
 
 Node* WasmGraphAssembler::LoadFixedArrayElement(Node* fixed_array,
                                                 Node* index_intptr,
                                                 MachineType type) {
   DCHECK(IsSubtype(type.representation(), MachineRepresentation::kTagged));
-  Node* offset = IntAdd(
-      IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
-      IntPtrConstant(wasm::ObjectAccess::ToTagged(FixedArray::kHeaderSize)));
+  Node* offset = IntAdd(IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
+                        IntPtrConstant(wasm::ObjectAccess::ToTagged(
+                            OFFSET_OF_DATA_START(FixedArray))));
   return LoadFromObject(type, fixed_array, offset);
 }
 
-Node* WasmGraphAssembler::LoadWeakArrayListElement(Node* fixed_array,
-                                                   Node* index_intptr,
-                                                   MachineType type) {
-  Node* offset = IntAdd(
-      IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
-      IntPtrConstant(wasm::ObjectAccess::ToTagged(WeakArrayList::kHeaderSize)));
-  return LoadFromObject(type, fixed_array, offset);
+Node* WasmGraphAssembler::LoadWeakFixedArrayElement(Node* fixed_array,
+                                                    Node* index_intptr) {
+  Node* offset = IntAdd(IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
+                        IntPtrConstant(wasm::ObjectAccess::ToTagged(
+                            OFFSET_OF_DATA_START(WeakFixedArray))));
+  return LoadFromObject(MachineType::AnyTagged(), fixed_array, offset);
 }
 
 Node* WasmGraphAssembler::LoadImmutableFixedArrayElement(Node* fixed_array,
                                                          Node* index_intptr,
                                                          MachineType type) {
-  Node* offset = IntAdd(
-      IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
-      IntPtrConstant(wasm::ObjectAccess::ToTagged(FixedArray::kHeaderSize)));
+  Node* offset = IntAdd(IntMul(index_intptr, IntPtrConstant(kTaggedSize)),
+                        IntPtrConstant(wasm::ObjectAccess::ToTagged(
+                            OFFSET_OF_DATA_START(FixedArray))));
   return LoadImmutableFromObject(type, fixed_array, offset);
 }
 
@@ -341,7 +340,7 @@ Node* WasmGraphAssembler::LoadProtectedFixedArrayElement(Node* array,
                                                          Node* index_intptr) {
   Node* offset = IntAdd(WordShl(index_intptr, IntPtrConstant(kTaggedSizeLog2)),
                         IntPtrConstant(wasm::ObjectAccess::ToTagged(
-                            ProtectedFixedArray::kHeaderSize)));
+                            OFFSET_OF_DATA_START(ProtectedFixedArray))));
   return LoadProtectedPointerFromObject(array, offset);
 }
 
@@ -349,25 +348,10 @@ Node* WasmGraphAssembler::LoadByteArrayElement(Node* byte_array,
                                                Node* index_intptr,
                                                MachineType type) {
   int element_size = ElementSizeInBytes(type.representation());
-  Node* offset = IntAdd(
-      IntMul(index_intptr, IntPtrConstant(element_size)),
-      IntPtrConstant(wasm::ObjectAccess::ToTagged(ByteArray::kHeaderSize)));
+  Node* offset = IntAdd(IntMul(index_intptr, IntPtrConstant(element_size)),
+                        IntPtrConstant(wasm::ObjectAccess::ToTagged(
+                            OFFSET_OF_DATA_START(ByteArray))));
   return LoadFromObject(type, byte_array, offset);
-}
-
-Node* WasmGraphAssembler::LoadExternalPointerArrayElement(
-    Node* array, Node* index_intptr, ExternalPointerTag tag,
-    Node* isolate_root) {
-  Node* offset = IntAdd(
-      IntMul(index_intptr, IntPtrConstant(kExternalPointerSlotSize)),
-      IntPtrConstant(
-          wasm::ObjectAccess::ToTagged(ExternalPointerArray::kHeaderSize)));
-#ifdef V8_ENABLE_SANDBOX
-  Node* handle = LoadFromObject(MachineType::Uint32(), array, offset);
-  return BuildDecodeSandboxedExternalPointer(handle, tag, isolate_root);
-#else
-  return LoadFromObject(MachineType::Pointer(), array, offset);
-#endif
 }
 
 Node* WasmGraphAssembler::LoadImmutableTrustedPointerFromObject(

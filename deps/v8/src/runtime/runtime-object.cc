@@ -339,13 +339,15 @@ RUNTIME_FUNCTION(Runtime_AddPrivateBrand) {
 // an Object.create stub.
 RUNTIME_FUNCTION(Runtime_ObjectCreate) {
   HandleScope scope(isolate);
-  Handle<Object> prototype = args.at(0);
+  Handle<Object> maybe_prototype = args.at(0);
   Handle<Object> properties = args.at(1);
   Handle<JSObject> obj;
   // 1. If Type(O) is neither Object nor Null, throw a TypeError exception.
-  if (!IsNull(*prototype, isolate) && !IsJSReceiver(*prototype)) {
+  Handle<JSPrototype> prototype;
+  if (!TryCast(maybe_prototype, &prototype)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
-        isolate, NewTypeError(MessageTemplate::kProtoObjectOrNull, prototype));
+        isolate,
+        NewTypeError(MessageTemplate::kProtoObjectOrNull, maybe_prototype));
   }
 
   // 2. Let obj be ObjectCreate(O).
@@ -704,8 +706,8 @@ RUNTIME_FUNCTION(Runtime_GetProperty) {
   } else if (IsString(*lookup_start_obj) && IsSmi(*key_obj)) {
     // Fast case for string indexing using [] with a smi index.
     Handle<String> str = Cast<String>(lookup_start_obj);
-    int smi_index = Cast<Smi>(*key_obj).value();
-    if (smi_index >= 0 && smi_index < str->length()) {
+    uint32_t smi_index = Cast<Smi>(*key_obj).value();
+    if (smi_index < str->length()) {
       Factory* factory = isolate->factory();
       return *factory->LookupSingleCharacterStringFromCode(
           String::Flatten(isolate, str)->Get(smi_index));
@@ -1097,7 +1099,7 @@ RUNTIME_FUNCTION(Runtime_CopyDataProperties) {
   MAYBE_RETURN(
       JSReceiver::SetOrCopyDataProperties(
           isolate, target, source,
-          PropertiesEnumerationMode::kPropertyAdditionOrder, nullptr, false),
+          PropertiesEnumerationMode::kPropertyAdditionOrder, {}, false),
       ReadOnlyRoots(isolate).exception());
   return ReadOnlyRoots(isolate).undefined_value();
 }
@@ -1125,7 +1127,7 @@ void CheckExcludedPropertiesAreOnCallerStack(Isolate* isolate, Address base,
   // ... and for the first JS frame, make sure the _first_ property address is
   // after that stack frame's start.
   for (; !it.done(); it.Advance()) {
-    if (it.frame()->is_java_script()) {
+    if (it.frame()->is_javascript()) {
       DCHECK_LT(base, it.frame()->fp());
       return;
     }
@@ -1158,8 +1160,8 @@ RUNTIME_FUNCTION(Runtime_CopyDataPropertiesWithExcludedPropertiesOnStack) {
                                                     MaybeHandle<Object>());
   }
 
-  base::ScopedVector<Handle<Object>> excluded_properties(
-      excluded_property_count);
+  DirectHandleVector<Object> excluded_properties(isolate,
+                                                 excluded_property_count);
   for (int i = 0; i < excluded_property_count; i++) {
     // Because the excluded properties on stack is from high address
     // to low address, so we need to use sub
@@ -1179,11 +1181,12 @@ RUNTIME_FUNCTION(Runtime_CopyDataPropertiesWithExcludedPropertiesOnStack) {
 
   Handle<JSObject> target =
       isolate->factory()->NewJSObject(isolate->object_function());
-  MAYBE_RETURN(JSReceiver::SetOrCopyDataProperties(
-                   isolate, target, source,
-                   PropertiesEnumerationMode::kPropertyAdditionOrder,
-                   &excluded_properties, false),
-               ReadOnlyRoots(isolate).exception());
+  MAYBE_RETURN(
+      JSReceiver::SetOrCopyDataProperties(
+          isolate, target, source,
+          PropertiesEnumerationMode::kPropertyAdditionOrder,
+          {excluded_properties.data(), excluded_properties.size()}, false),
+      ReadOnlyRoots(isolate).exception());
   return *target;
 }
 

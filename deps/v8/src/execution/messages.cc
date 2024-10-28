@@ -77,9 +77,7 @@ void MessageHandler::DefaultMessageReport(Isolate* isolate,
 
 Handle<JSMessageObject> MessageHandler::MakeMessageObject(
     Isolate* isolate, MessageTemplate message, const MessageLocation* location,
-    DirectHandle<Object> argument, DirectHandle<FixedArray> stack_frames) {
-  Factory* factory = isolate->factory();
-
+    DirectHandle<Object> argument, DirectHandle<StackTraceInfo> stack_trace) {
   int start = -1;
   int end = -1;
   int bytecode_offset = -1;
@@ -93,15 +91,9 @@ Handle<JSMessageObject> MessageHandler::MakeMessageObject(
     shared_info = location->shared();
   }
 
-  DirectHandle<Object> stack_frames_handle =
-      stack_frames.is_null() ? Cast<Object>(factory->undefined_value())
-                             : Cast<Object>(stack_frames);
-
-  Handle<JSMessageObject> message_obj = factory->NewJSMessageObject(
-      message, argument, start, end, shared_info, bytecode_offset,
-      script_handle, stack_frames_handle);
-
-  return message_obj;
+  return isolate->factory()->NewJSMessageObject(message, argument, start, end,
+                                                shared_info, bytecode_offset,
+                                                script_handle, stack_trace);
 }
 
 void MessageHandler::ReportMessage(Isolate* isolate, const MessageLocation* loc,
@@ -337,8 +329,8 @@ MaybeHandle<Object> ErrorUtils::FormatStackTrace(
         ASSIGN_RETURN_ON_EXCEPTION(isolate, sites,
                                    GetStackFrames(isolate, elems));
 
-        const int argc = 2;
-        base::ScopedVector<Handle<Object>> argv(argc);
+        constexpr int argc = 2;
+        std::array<Handle<Object>, argc> argv;
         if (V8_UNLIKELY(IsJSGlobalObject(*error))) {
           // Pass global proxy instead of global object.
           argv[0] =
@@ -353,8 +345,7 @@ MaybeHandle<Object> ErrorUtils::FormatStackTrace(
         ASSIGN_RETURN_ON_EXCEPTION(
             isolate, result,
             Execution::Call(isolate, prepare_stack_trace, global_error, argc,
-                            argv.begin()));
-
+                            argv.data()));
         return result;
       }
     }
@@ -1152,7 +1143,6 @@ MaybeHandle<Object> ErrorUtils::GetFormattedStack(
     if (error_stack_data->HasFormattedStack()) {
       return handle(error_stack_data->formatted_stack(), isolate);
     }
-    ErrorStackData::EnsureStackFrameInfos(isolate, error_stack_data);
 
     Handle<JSObject> error_object =
         lookup.error_stack_symbol_holder.ToHandleChecked();
@@ -1198,7 +1188,6 @@ void ErrorUtils::SetFormattedStack(Isolate* isolate,
 
   if (IsErrorStackData(*lookup.error_stack)) {
     auto error_stack_data = Cast<ErrorStackData>(lookup.error_stack);
-    ErrorStackData::EnsureStackFrameInfos(isolate, error_stack_data);
     error_stack_data->set_formatted_stack(*formatted_stack);
   } else {
     Object::SetProperty(isolate, error_object,

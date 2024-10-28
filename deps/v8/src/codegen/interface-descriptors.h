@@ -153,6 +153,7 @@ namespace internal {
   V(WasmJSToWasmWrapper)                             \
   V(WasmToJSWrapper)                                 \
   V(WasmSuspend)                                     \
+  V(WasmHandleStackOverflow)                         \
   V(WriteBarrier)                                    \
   V(IndirectPointerWriteBarrier)                     \
   IF_TSAN(V, TSANLoad)                               \
@@ -847,6 +848,20 @@ class WasmDummyWithJSLinkageDescriptor
   DECLARE_DESCRIPTOR(WasmDummyWithJSLinkageDescriptor)
 };
 
+class WasmHandleStackOverflowDescriptor
+    : public StaticCallInterfaceDescriptor<WasmHandleStackOverflowDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  DEFINE_PARAMETERS_NO_CONTEXT(kFrameBase, kGap)
+  DEFINE_RESULT_AND_PARAMETER_TYPES(MachineType::AnyTagged(),  // result
+                                    MachineType::Pointer(),    // kFrameBase
+                                    MachineType::Uint32())     // kGap
+  DECLARE_DESCRIPTOR(WasmHandleStackOverflowDescriptor)
+
+  static constexpr inline Register FrameBaseRegister();
+  static constexpr inline Register GapRegister();
+};
+
 class AllocateDescriptor
     : public StaticCallInterfaceDescriptor<AllocateDescriptor> {
  public:
@@ -869,9 +884,23 @@ class NewHeapNumberDescriptor
   DECLARE_DESCRIPTOR(NewHeapNumberDescriptor)
 };
 
-// This descriptor defines the JavaScript calling convention that can be used
-// by stubs: target, new.target, argc and context are passed in registers while
+// This descriptor defines the JavaScript calling convention and is used by all
+// code that can be installed on a JSFunction. Target, new.target, argc,
+// context and potentially the dispatch entry are passed in registers while
 // receiver and the rest of the JS arguments are passed on the stack.
+#ifdef V8_ENABLE_LEAPTIERING
+class JSTrampolineDescriptor
+    : public StaticJSCallInterfaceDescriptor<JSTrampolineDescriptor> {
+ public:
+  SANDBOX_EXPOSED_DESCRIPTOR(kJSEntrypointTag)
+  DEFINE_JS_PARAMETERS(kDispatchHandle)
+  DEFINE_JS_PARAMETER_TYPES(MachineType::Int32())
+
+  DECLARE_JS_COMPATIBLE_DESCRIPTOR(JSTrampolineDescriptor)
+
+  static constexpr auto registers();
+};
+#else
 class JSTrampolineDescriptor
     : public StaticJSCallInterfaceDescriptor<JSTrampolineDescriptor> {
  public:
@@ -880,7 +909,10 @@ class JSTrampolineDescriptor
   DEFINE_JS_PARAMETER_TYPES()
 
   DECLARE_JS_COMPATIBLE_DESCRIPTOR(JSTrampolineDescriptor)
+
+  static constexpr auto registers();
 };
+#endif
 
 // Descriptor used for code using the RegExp calling convention, in particular
 // the RegExp interpreter trampolines.
@@ -1756,6 +1788,20 @@ class CallWithArrayLike_WithFeedbackDescriptor
   DECLARE_DESCRIPTOR(CallWithArrayLike_WithFeedbackDescriptor)
 };
 
+// TODO(ishell): consider merging this with ArrayConstructorDescriptor
+class ConstructStubDescriptor
+    : public StaticCallInterfaceDescriptor<ConstructStubDescriptor> {
+ public:
+  INTERNAL_DESCRIPTOR()
+  DEFINE_JS_PARAMETERS()
+  DEFINE_JS_PARAMETER_TYPES()
+
+  // TODO(ishell): Use DECLARE_JS_COMPATIBLE_DESCRIPTOR if registers match
+  DECLARE_DESCRIPTOR(ConstructStubDescriptor)
+
+  static constexpr inline auto registers();
+};
+
 class ConstructVarargsDescriptor
     : public StaticCallInterfaceDescriptor<ConstructVarargsDescriptor> {
  public:
@@ -1862,20 +1908,6 @@ class ConstructForwardAllArgs_WithFeedbackDescriptor
                          MachineType::AnyTagged(),  // kSlot
                          MachineType::AnyTagged())  // kVector
   DECLARE_DESCRIPTOR(ConstructForwardAllArgs_WithFeedbackDescriptor)
-};
-
-// TODO(ishell): consider merging this with ArrayConstructorDescriptor
-class ConstructStubDescriptor
-    : public StaticCallInterfaceDescriptor<ConstructStubDescriptor> {
- public:
-  INTERNAL_DESCRIPTOR()
-  DEFINE_JS_PARAMETERS()
-  DEFINE_JS_PARAMETER_TYPES()
-
-  // TODO(ishell): Use DECLARE_JS_COMPATIBLE_DESCRIPTOR if registers match
-  DECLARE_DESCRIPTOR(ConstructStubDescriptor)
-
-  static constexpr inline auto registers();
 };
 
 class AbortDescriptor : public StaticCallInterfaceDescriptor<AbortDescriptor> {

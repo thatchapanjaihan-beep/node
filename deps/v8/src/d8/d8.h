@@ -34,7 +34,7 @@ class D8Console;
 class Message;
 class TryCatch;
 
-enum class ModuleType { kJavaScript, kJSON, kInvalid };
+enum class ModuleType { kJavaScript, kJSON, kWebAssembly, kInvalid };
 
 namespace internal {
 class CancelableTaskManager;
@@ -529,6 +529,9 @@ class Shell : public i::AllStatic {
   };
   enum class CodeType { kFileName, kString, kFunction, kInvalid, kNone };
 
+  // Boolean return values (for any method below) typically denote "success".
+  // We return `false` on uncaught exceptions, except for termination
+  // exceptions.
   static bool ExecuteString(Isolate* isolate, Local<String> source,
                             Local<String> name,
                             ReportExceptions report_exceptions,
@@ -540,6 +543,8 @@ class Shell : public i::AllStatic {
   static void ReportException(Isolate* isolate, const TryCatch& try_catch);
   static MaybeLocal<String> ReadFile(Isolate* isolate, const char* name,
                                      bool should_throw = true);
+  static std::unique_ptr<base::OS::MemoryMappedFile> ReadFileData(
+      Isolate* isolate, const char* name, bool should_throw = true);
   static Local<String> WasmLoadSourceMapCallback(Isolate* isolate,
                                                  const char* name);
   static MaybeLocal<Context> CreateEvaluationContext(Isolate* isolate);
@@ -716,6 +721,10 @@ class Shell : public i::AllStatic {
       Local<Context> context, Local<Data> host_defined_options,
       Local<Value> resource_name, Local<String> specifier,
       Local<FixedArray> import_attributes);
+  static MaybeLocal<Promise> HostImportModuleWithPhaseDynamically(
+      Local<Context> context, Local<Data> host_defined_options,
+      Local<Value> resource_name, Local<String> specifier,
+      ModuleImportPhase phase, Local<FixedArray> import_attributes);
 
   static void ModuleResolutionSuccessCallback(
       const v8::FunctionCallbackInfo<v8::Value>& info);
@@ -829,6 +838,10 @@ class Shell : public i::AllStatic {
       v8::MaybeLocal<Value> global_object);
   static void DisposeRealm(const v8::FunctionCallbackInfo<v8::Value>& info,
                            int index);
+
+  static MaybeLocal<Object> FetchModuleSource(
+      v8::Local<v8::Module> origin_module, v8::Local<v8::Context> context,
+      const std::string& file_name, ModuleType module_type);
   static MaybeLocal<Module> FetchModuleTree(v8::Local<v8::Module> origin_module,
                                             v8::Local<v8::Context> context,
                                             const std::string& file_name,

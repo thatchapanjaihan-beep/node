@@ -20,6 +20,7 @@
 #include "src/handles/maybe-handles.h"
 #include "src/heap/factory-inl.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/mutable-page-metadata.h"
 #include "src/heap/pretenuring-handler-inl.h"
 #include "src/init/bootstrapper.h"
@@ -255,12 +256,11 @@ Maybe<bool> JSReceiver::CheckPrivateNameStore(LookupIterator* it,
 
 namespace {
 
-bool HasExcludedProperty(
-    const base::ScopedVector<Handle<Object>>* excluded_properties,
-    DirectHandle<Object> search_element) {
+bool HasExcludedProperty(base::Vector<DirectHandle<Object>> excluded_properties,
+                         DirectHandle<Object> search_element) {
   // TODO(gsathya): Change this to be a hashtable.
-  for (int i = 0; i < excluded_properties->length(); i++) {
-    if (Object::SameValue(*search_element, *excluded_properties->at(i))) {
+  for (DirectHandle<Object> object : excluded_properties) {
+    if (Object::SameValue(*search_element, *object)) {
       return true;
     }
   }
@@ -268,11 +268,13 @@ bool HasExcludedProperty(
   return false;
 }
 
+// If direct handles are enabled, it is the responsibility of the caller to
+// ensure that the memory pointed to by `excluded_properties` is scanned
+// during CSS, e.g., it comes from a `DirectHandleVector<Object>`.
 V8_WARN_UNUSED_RESULT Maybe<bool> FastAssign(
     Isolate* isolate, Handle<JSReceiver> target, Handle<Object> source,
     PropertiesEnumerationMode mode,
-    const base::ScopedVector<Handle<Object>>* excluded_properties,
-    bool use_set) {
+    base::Vector<DirectHandle<Object>> excluded_properties, bool use_set) {
   // Non-empty strings are the only non-JSReceivers that need to be handled
   // explicitly by Object.assign.
   if (!IsJSReceiver(*source)) {
@@ -377,7 +379,7 @@ V8_WARN_UNUSED_RESULT Maybe<bool> FastAssign(
       } else {
         // No element indexes should get here or the exclusion check may
         // yield false negatives for type mismatch.
-        if (excluded_properties != nullptr &&
+        if (!excluded_properties.empty() &&
             HasExcludedProperty(excluded_properties, next_key)) {
           continue;
         }
@@ -410,8 +412,7 @@ V8_WARN_UNUSED_RESULT Maybe<bool> FastAssign(
 Maybe<bool> JSReceiver::SetOrCopyDataProperties(
     Isolate* isolate, Handle<JSReceiver> target, Handle<Object> source,
     PropertiesEnumerationMode mode,
-    const base::ScopedVector<Handle<Object>>* excluded_properties,
-    bool use_set) {
+    base::Vector<DirectHandle<Object>> excluded_properties, bool use_set) {
   Maybe<bool> fast_assign =
       FastAssign(isolate, target, source, mode, excluded_properties, use_set);
   if (fast_assign.IsNothing()) return Nothing<bool>();
@@ -453,7 +454,7 @@ Maybe<bool> JSReceiver::SetOrCopyDataProperties(
   // 4. Repeat for each element nextKey of keys in List order,
   for (int i = 0; i < keys->length(); ++i) {
     Handle<Object> next_key(keys->get(i), isolate);
-    if (excluded_properties != nullptr &&
+    if (!excluded_properties.empty() &&
         HasExcludedProperty(excluded_properties, next_key)) {
       continue;
     }
@@ -990,25 +991,25 @@ Maybe<bool> JSReceiver::DeleteProperty(LookupIterator* it,
   }
 }
 
-Maybe<bool> JSReceiver::DeleteElement(Handle<JSReceiver> object, uint32_t index,
+Maybe<bool> JSReceiver::DeleteElement(Isolate* isolate,
+                                      Handle<JSReceiver> object, uint32_t index,
                                       LanguageMode language_mode) {
-  LookupIterator it(object->GetIsolate(), object, index, object,
-                    LookupIterator::OWN);
+  LookupIterator it(isolate, object, index, object, LookupIterator::OWN);
   return DeleteProperty(&it, language_mode);
 }
 
-Maybe<bool> JSReceiver::DeleteProperty(Handle<JSReceiver> object,
+Maybe<bool> JSReceiver::DeleteProperty(Isolate* isolate,
+                                       Handle<JSReceiver> object,
                                        Handle<Name> name,
                                        LanguageMode language_mode) {
-  LookupIterator it(object->GetIsolate(), object, name, object,
-                    LookupIterator::OWN);
+  LookupIterator it(isolate, object, name, object, LookupIterator::OWN);
   return DeleteProperty(&it, language_mode);
 }
 
-Maybe<bool> JSReceiver::DeletePropertyOrElement(Handle<JSReceiver> object,
+Maybe<bool> JSReceiver::DeletePropertyOrElement(Isolate* isolate,
+                                                Handle<JSReceiver> object,
                                                 Handle<Name> name,
                                                 LanguageMode language_mode) {
-  Isolate* isolate = object->GetIsolate();
   PropertyKey key(isolate, name);
   LookupIterator it(isolate, object, key, object, LookupIterator::OWN);
   return DeleteProperty(&it, language_mode);
@@ -2402,13 +2403,12 @@ MaybeHandle<JSObject> JSObject::NewWithMap(Isolate* isolate,
 // 9.1.12 ObjectCreate ( proto [ , internalSlotsList ] )
 // Notice: This is NOT 19.1.2.2 Object.create ( O, Properties )
 MaybeHandle<JSObject> JSObject::ObjectCreate(Isolate* isolate,
-                                             Handle<Object> prototype) {
+                                             Handle<JSPrototype> prototype) {
   // Generate the map with the specified {prototype} based on the Object
   // function's initial map from the current native context.
   // TODO(bmeurer): Use a dedicated cache for Object.create; think about
   // slack tracking for Object.create.
-  DirectHandle<Map> map =
-      Map::GetObjectCreateMap(isolate, Cast<HeapObject>(prototype));
+  DirectHandle<Map> map = Map::GetObjectCreateMap(isolate, prototype);
 
   // Actually allocate the object.
   return isolate->factory()->NewFastOrSlowJSObjectFromMap(map);
@@ -2890,6 +2890,9 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
     case JS_SHARED_STRUCT_TYPE:
       accumulator->Add("<JSSharedStruct>");
       break;
+    case JS_ATOMICS_MUTEX_TYPE:
+      accumulator->Add("<JSAtomicsMutex>");
+      break;
     case JS_MESSAGE_OBJECT_TYPE:
       accumulator->Add("<JSMessageObject>");
       break;
@@ -2910,7 +2913,7 @@ void JSObject::JSObjectShortPrint(StringStream* accumulator) {
         if (IsJSFunction(constructor)) {
           Tagged<SharedFunctionInfo> sfi =
               Cast<JSFunction>(constructor)->shared();
-          if (!InReadOnlySpace(sfi) && !heap->Contains(sfi)) {
+          if (!HeapLayout::InReadOnlySpace(sfi) && !heap->Contains(sfi)) {
             accumulator->Add("!!!INVALID SHARED ON CONSTRUCTOR!!!");
           } else {
             Tagged<String> constructor_name = sfi->Name();
@@ -3087,14 +3090,14 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
     // If the map does not add named properties, simply set the map.
     if (old_map->NumberOfOwnDescriptors() ==
         new_map->NumberOfOwnDescriptors()) {
-      object->set_map(*new_map, kReleaseStore);
+      object->set_map(isolate, *new_map, kReleaseStore);
       return;
     }
 
     // If the map adds a new kDescriptor property, simply set the map.
     PropertyDetails details = new_map->GetLastDescriptorDetails(isolate);
     if (details.location() == PropertyLocation::kDescriptor) {
-      object->set_map(*new_map, kReleaseStore);
+      object->set_map(isolate, *new_map, kReleaseStore);
       return;
     }
 
@@ -3109,7 +3112,7 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
         auto value = isolate->factory()->NewHeapNumberWithHoleNaN();
         object->FastPropertyAtPut(index, *value);
       }
-      object->set_map(*new_map, kReleaseStore);
+      object->set_map(isolate, *new_map, kReleaseStore);
       return;
     }
 
@@ -3138,7 +3141,7 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
 
     // Set the new property value and do the map transition.
     object->SetProperties(*new_storage);
-    object->set_map(*new_map, kReleaseStore);
+    object->set_map(isolate, *new_map, kReleaseStore);
     return;
   }
 
@@ -3152,7 +3155,7 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
   if (!old_map->InstancesNeedRewriting(*new_map, number_of_fields, inobject,
                                        unused, &old_number_of_fields,
                                        ConcurrencyMode::kSynchronous)) {
-    object->set_map(*new_map, kReleaseStore);
+    object->set_map(isolate, *new_map, kReleaseStore);
     return;
   }
 
@@ -3269,7 +3272,7 @@ void MigrateFastToFast(Isolate* isolate, DirectHandle<JSObject> object,
 
   // We are storing the new map using release store after creating a filler for
   // the left-over space to avoid races with the sweeper thread.
-  object->set_map(*new_map, kReleaseStore);
+  object->set_map(isolate, *new_map, kReleaseStore);
 }
 
 void MigrateFastToSlow(Isolate* isolate, DirectHandle<JSObject> object,
@@ -3369,7 +3372,7 @@ void MigrateFastToSlow(Isolate* isolate, DirectHandle<JSObject> object,
 
   // We are storing the new map using release store after creating a filler for
   // the left-over space to avoid races with the sweeper thread.
-  object->set_map(*new_map, kReleaseStore);
+  object->set_map(isolate, *new_map, kReleaseStore);
 
   if constexpr (V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL) {
     object->SetProperties(*ord_dictionary);
@@ -3411,7 +3414,7 @@ void JSObject::MigrateToMap(Isolate* isolate, DirectHandle<JSObject> object,
     CHECK(new_map->is_dictionary_map());
 
     // Slow-to-slow migration is trivial.
-    object->set_map(*new_map, kReleaseStore);
+    object->set_map(isolate, *new_map, kReleaseStore);
   } else if (!new_map->is_dictionary_map()) {
     MigrateFastToFast(isolate, object, new_map);
     if (old_map->is_prototype_map()) {
@@ -3444,7 +3447,7 @@ void JSObject::MigrateToMap(Isolate* isolate, DirectHandle<JSObject> object,
 
 void JSObject::ForceSetPrototype(Isolate* isolate,
                                  DirectHandle<JSObject> object,
-                                 Handle<HeapObject> proto) {
+                                 Handle<JSPrototype> proto) {
   // object.__proto__ = proto;
   Handle<Map> old_map = Handle<Map>(object->map(), isolate);
   DirectHandle<Map> new_map = Map::Copy(isolate, old_map, "ForceSetPrototype");
@@ -3519,7 +3522,7 @@ void JSObject::AllocateStorageForMap(Handle<JSObject> object, Handle<Map> map) {
     Tagged<Object> value = storage->get(i);
     object->FastPropertyAtPut(index, value);
   }
-  object->set_map(*map, kReleaseStore);
+  object->set_map(isolate, *map, kReleaseStore);
 }
 
 void JSObject::MigrateInstance(Isolate* isolate,
@@ -3818,9 +3821,8 @@ void JSObject::NormalizeProperties(Isolate* isolate,
   if (!object->HasFastProperties()) return;
 
   Handle<Map> map(object->map(), isolate);
-  DirectHandle<Map> new_map =
-      Map::Normalize(isolate, map, map->elements_kind(), Handle<HeapObject>(),
-                     mode, use_cache, reason);
+  DirectHandle<Map> new_map = Map::Normalize(isolate, map, map->elements_kind(),
+                                             {}, mode, use_cache, reason);
 
   JSObject::MigrateToMap(isolate, object, new_map,
                          expected_additional_properties);
@@ -3903,7 +3905,7 @@ void JSObject::MigrateSlowToFast(DirectHandle<JSObject> object,
     DCHECK_LE(unused_property_fields, inobject_props);
     // Transform the object.
     new_map->SetInObjectUnusedPropertyFields(inobject_props);
-    object->set_map(*new_map, kReleaseStore);
+    object->set_map(isolate, *new_map, kReleaseStore);
     object->SetProperties(ReadOnlyRoots(isolate).empty_fixed_array());
     // Check that it really works.
     DCHECK(object->HasFastProperties());
@@ -4022,7 +4024,7 @@ void JSObject::MigrateSlowToFast(DirectHandle<JSObject> object,
     LOG(isolate, MapEvent("SlowToFast", old_map, new_map, reason));
   }
   // Transform the object.
-  object->set_map(*new_map, kReleaseStore);
+  object->set_map(isolate, *new_map, kReleaseStore);
 
   object->SetProperties(*fields);
   DCHECK(IsJSObject(*object));
@@ -4212,7 +4214,7 @@ bool TestPropertiesIntegrityLevel(Tagged<JSObject> object,
   }
 }
 
-bool TestElementsIntegrityLevel(Tagged<JSObject> object,
+bool TestElementsIntegrityLevel(Isolate* isolate, Tagged<JSObject> object,
                                 PropertyAttributes level) {
   DCHECK(!object->HasSloppyArgumentsElements());
 
@@ -4236,14 +4238,15 @@ bool TestElementsIntegrityLevel(Tagged<JSObject> object,
   ElementsAccessor* accessor = ElementsAccessor::ForKind(kind);
   // Only DICTIONARY_ELEMENTS and SLOW_SLOPPY_ARGUMENTS_ELEMENTS have
   // PropertyAttributes so just test if empty
-  return accessor->NumberOfElements(object) == 0;
+  return accessor->NumberOfElements(isolate, object) == 0;
 }
 
-bool FastTestIntegrityLevel(Tagged<JSObject> object, PropertyAttributes level) {
+bool FastTestIntegrityLevel(Isolate* isolate, Tagged<JSObject> object,
+                            PropertyAttributes level) {
   DCHECK(!IsCustomElementsReceiverMap(object->map()));
 
   return !object->map()->is_extensible() &&
-         TestElementsIntegrityLevel(object, level) &&
+         TestElementsIntegrityLevel(isolate, object, level) &&
          TestPropertiesIntegrityLevel(object, level);
 }
 
@@ -4254,7 +4257,7 @@ Maybe<bool> JSObject::TestIntegrityLevel(Isolate* isolate,
                                          IntegrityLevel level) {
   if (!IsCustomElementsReceiverMap(object->map()) &&
       !object->HasSloppyArgumentsElements()) {
-    return Just(FastTestIntegrityLevel(*object, level));
+    return Just(FastTestIntegrityLevel(isolate, *object, level));
   }
   return GenericTestIntegrityLevel(isolate, Cast<JSReceiver>(object), level);
 }
@@ -4420,7 +4423,7 @@ Maybe<bool> JSObject::PreventExtensionsWithTransition(
   // ordinary ECMAScript objects allow sealed to be upgraded to frozen. This
   // upgrade violates the fixed layout invariant and is disallowed.
   if (IsAlwaysSharedSpaceJSObject(*object)) {
-    DCHECK(FastTestIntegrityLevel(*object, SEALED));
+    DCHECK(FastTestIntegrityLevel(isolate, *object, SEALED));
     if (attrs != FROZEN) return Just(true);
     RETURN_FAILURE(isolate, should_throw,
                    NewTypeError(MessageTemplate::kCannotFreeze));
@@ -5200,7 +5203,8 @@ void JSObject::InvalidatePrototypeValidityCell(Tagged<JSGlobalObject> global) {
 }
 
 Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
-                                   Handle<Object> value, bool from_javascript,
+                                   Handle<Object> value_obj,
+                                   bool from_javascript,
                                    ShouldThrow should_throw) {
 #ifdef DEBUG
   int size = object->Size();
@@ -5219,7 +5223,8 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
 
   // Silently ignore the change if value is not a JSReceiver or null.
   // SpiderMonkey behaves this way.
-  if (!IsJSReceiver(*value) && !IsNull(*value, isolate)) return Just(true);
+  Handle<JSPrototype> value;
+  if (!TryCast(value_obj, &value)) return Just(true);
 
   bool all_extensible = object->map()->is_extensible();
   Handle<JSObject> real_receiver = object;
@@ -5268,9 +5273,8 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
   // Before we can set the prototype we need to be sure prototype cycles are
   // prevented.  It is sufficient to validate that the receiver is not in the
   // new prototype chain.
-  if (IsJSReceiver(*value)) {
-    for (PrototypeIterator iter(isolate, Cast<JSReceiver>(*value),
-                                kStartAtReceiver);
+  if (Tagged<JSReceiver> receiver; TryCast<JSReceiver>(*value, &receiver)) {
+    for (PrototypeIterator iter(isolate, receiver, kStartAtReceiver);
          !iter.IsAtEnd(); iter.Advance()) {
       if (iter.GetCurrent<JSReceiver>() == *object) {
         // Cycle detected.
@@ -5286,10 +5290,8 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
 
   DirectHandle<Map> new_map =
       v8_flags.move_prototype_transitions_first
-          ? MapUpdater(isolate, map)
-                .ApplyPrototypeTransition(Cast<HeapObject>(value))
-          : Map::TransitionToUpdatePrototype(isolate, map,
-                                             Cast<HeapObject>(value));
+          ? MapUpdater(isolate, map).ApplyPrototypeTransition(value)
+          : Map::TransitionToUpdatePrototype(isolate, map, value);
 
   DCHECK(new_map->prototype() == *value);
   JSObject::MigrateToMap(isolate, real_receiver, new_map);
@@ -5301,15 +5303,15 @@ Maybe<bool> JSObject::SetPrototype(Isolate* isolate, Handle<JSObject> object,
 }
 
 // static
-void JSObject::SetImmutableProto(DirectHandle<JSObject> object) {
-  Handle<Map> map(object->map(), object->GetIsolate());
+void JSObject::SetImmutableProto(Isolate* isolate,
+                                 DirectHandle<JSObject> object) {
+  Handle<Map> map(object->map(), isolate);
 
   // Nothing to do if prototype is already set.
   if (map->is_immutable_proto()) return;
 
-  DirectHandle<Map> new_map =
-      Map::TransitionToImmutableProto(object->GetIsolate(), map);
-  object->set_map(*new_map, kReleaseStore);
+  DirectHandle<Map> new_map = Map::TransitionToImmutableProto(isolate, map);
+  object->set_map(isolate, *new_map, kReleaseStore);
 }
 
 void JSObject::EnsureCanContainElements(Handle<JSObject> object,
@@ -5453,7 +5455,7 @@ bool JSObject::UpdateAllocationSite(DirectHandle<JSObject> object,
                                     ElementsKind to_kind) {
   if (!IsJSArray(*object)) return false;
 
-  if (!Heap::InYoungGeneration(*object)) return false;
+  if (!HeapLayout::InYoungGeneration(*object)) return false;
 
   if (Heap::IsLargeObject(*object)) return false;
 
@@ -5462,11 +5464,9 @@ bool JSObject::UpdateAllocationSite(DirectHandle<JSObject> object,
     DisallowGarbageCollection no_gc;
 
     Heap* heap = object->GetHeap();
-    PretenuringHandler* pretunring_handler = heap->pretenuring_handler();
     Tagged<AllocationMemento> memento =
-        pretunring_handler
-            ->FindAllocationMemento<PretenuringHandler::kForRuntime>(
-                object->map(), *object);
+        PretenuringHandler::FindAllocationMemento<
+            PretenuringHandler::kForRuntime>(heap, object->map(), *object);
     if (memento.is_null()) return false;
 
     // Walk through to the Allocation Site

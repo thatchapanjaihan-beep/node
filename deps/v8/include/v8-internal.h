@@ -18,6 +18,22 @@
 
 #include "v8config.h"  // NOLINT(build/include_directory)
 
+// TODO(pkasting): Use <compare>/spaceship unconditionally after dropping
+// support for old libstdc++ versions.
+#if __has_include(<version>)
+#include <version>
+#endif
+#if defined(__cpp_lib_three_way_comparison) &&   \
+    __cpp_lib_three_way_comparison >= 201711L && \
+    defined(__cpp_lib_concepts) && __cpp_lib_concepts >= 202002L
+#include <compare>
+#include <concepts>
+
+#define V8_HAVE_SPACESHIP_OPERATOR 1
+#else
+#define V8_HAVE_SPACESHIP_OPERATOR 0
+#endif
+
 namespace v8 {
 
 class Array;
@@ -28,7 +44,9 @@ class Isolate;
 namespace internal {
 
 class Heap;
+class LocalHeap;
 class Isolate;
+class LocalIsolate;
 
 typedef uintptr_t Address;
 static constexpr Address kNullAddress = 0;
@@ -144,15 +162,15 @@ struct SmiTagging<8> {
                                                std::is_signed_v<T>>* = nullptr>
   V8_INLINE static constexpr bool IsValidSmi(T value) {
     // To be representable as a long smi, the value must be a 32-bit integer.
-    return (value == static_cast<int32_t>(value));
+    return std::numeric_limits<int32_t>::min() <= value &&
+           value <= std::numeric_limits<int32_t>::max();
   }
 
   template <class T,
             typename std::enable_if_t<std::is_integral_v<T> &&
                                       std::is_unsigned_v<T>>* = nullptr>
   V8_INLINE static constexpr bool IsValidSmi(T value) {
-    return (static_cast<uintptr_t>(value) ==
-            static_cast<uintptr_t>(static_cast<int32_t>(value)));
+    return value <= std::numeric_limits<int32_t>::max();
   }
 };
 
@@ -218,10 +236,6 @@ using SandboxedPointer_t = Address;
 // virtual address space for userspace. As such, limit the sandbox to 128GB (a
 // quarter of the total available address space).
 constexpr size_t kSandboxSizeLog2 = 37;  // 128 GB
-#elif defined(V8_TARGET_ARCH_LOONG64)
-// Some Linux distros on LoongArch64 configured with only 40 bits of virtual
-// address space for userspace. Limit the sandbox to 256GB here.
-constexpr size_t kSandboxSizeLog2 = 38;  // 256 GB
 #else
 // Everywhere else use a 1TB sandbox.
 constexpr size_t kSandboxSizeLog2 = 40;  // 1 TB
@@ -295,7 +309,8 @@ constexpr size_t kExternalPointerTableReservationSize = 256 * MB;
 
 // The external pointer table indices stored in HeapObjects as external
 // pointers are shifted to the left by this amount to guarantee that they are
-// smaller than the maximum table size.
+// smaller than the maximum table size even after the C++ compiler multiplies
+// them by 8 to be used as indexes into a table of 64 bit pointers.
 constexpr uint32_t kExternalPointerIndexShift = 7;
 #else
 constexpr size_t kExternalPointerTableReservationSize = 512 * MB;
@@ -946,8 +961,10 @@ class Internals {
       kIsolateCppHeapPointerTableOffset + kExternalPointerTableSize;
   static const int kIsolateTrustedPointerTableOffset =
       kIsolateTrustedCageBaseOffset + kApiSystemPointerSize;
-  static const int kIsolateApiCallbackThunkArgumentOffset =
+  static const int kIsolateSharedTrustedPointerTableAddressOffset =
       kIsolateTrustedPointerTableOffset + kTrustedPointerTableSize;
+  static const int kIsolateApiCallbackThunkArgumentOffset =
+      kIsolateSharedTrustedPointerTableAddressOffset + kApiSystemPointerSize;
 #else
   static const int kIsolateApiCallbackThunkArgumentOffset =
       kIsolateCppHeapPointerTableOffset + kExternalPointerTableSize;
@@ -1030,7 +1047,7 @@ class Internals {
 
   // Soft limit for AdjustAmountofExternalAllocatedMemory. Trigger an
   // incremental GC once the external memory reaches this limit.
-  static constexpr int kExternalAllocationSoftLimit = 64 * 1024 * 1024;
+  static constexpr size_t kExternalAllocationSoftLimit = 64 * 1024 * 1024;
 
 #ifdef V8_MAP_PACKING
   static const uintptr_t kMapWordMetadataMask = 0xffffULL << 48;
@@ -1351,16 +1368,19 @@ class V8_EXPORT StrongRootAllocatorBase {
  public:
   Heap* heap() const { return heap_; }
 
-  bool operator==(const StrongRootAllocatorBase& other) const {
-    return heap_ == other.heap_;
-  }
-  bool operator!=(const StrongRootAllocatorBase& other) const {
-    return heap_ != other.heap_;
+  friend bool operator==(const StrongRootAllocatorBase& a,
+                         const StrongRootAllocatorBase& b) {
+    // TODO(pkasting): Replace this body with `= default` after dropping support
+    // for old gcc versions.
+    return a.heap_ == b.heap_;
   }
 
  protected:
   explicit StrongRootAllocatorBase(Heap* heap) : heap_(heap) {}
+  explicit StrongRootAllocatorBase(LocalHeap* heap);
   explicit StrongRootAllocatorBase(Isolate* isolate);
+  explicit StrongRootAllocatorBase(v8::Isolate* isolate);
+  explicit StrongRootAllocatorBase(LocalIsolate* isolate);
 
   // Allocate/deallocate a range of n elements of type internal::Address.
   Address* allocate_impl(size_t n);
@@ -1380,9 +1400,8 @@ class StrongRootAllocator : private std::allocator<T> {
  public:
   using value_type = T;
 
-  explicit StrongRootAllocator(Heap* heap) {}
-  explicit StrongRootAllocator(Isolate* isolate) {}
-  explicit StrongRootAllocator(v8::Isolate* isolate) {}
+  template <typename HeapOrIsolateT>
+  explicit StrongRootAllocator(HeapOrIsolateT*) {}
   template <typename U>
   StrongRootAllocator(const StrongRootAllocator<U>& other) noexcept {}
 
@@ -1390,22 +1409,61 @@ class StrongRootAllocator : private std::allocator<T> {
   using std::allocator<T>::deallocate;
 };
 
+// TODO(pkasting): Replace with `requires` clauses after dropping support for
+// old gcc versions.
+template <typename Iterator, typename = void>
+inline constexpr bool kHaveIteratorConcept = false;
+template <typename Iterator>
+inline constexpr bool kHaveIteratorConcept<
+    Iterator, std::void_t<typename Iterator::iterator_concept>> = true;
+
+template <typename Iterator, typename = void>
+inline constexpr bool kHaveIteratorCategory = false;
+template <typename Iterator>
+inline constexpr bool kHaveIteratorCategory<
+    Iterator, std::void_t<typename Iterator::iterator_category>> = true;
+
+// Helper struct that contains an `iterator_concept` type alias only when either
+// `Iterator` or `std::iterator_traits<Iterator>` do.
+// Default: no alias.
+template <typename Iterator, typename = void>
+struct MaybeDefineIteratorConcept {};
+// Use `Iterator::iterator_concept` if available.
+template <typename Iterator>
+struct MaybeDefineIteratorConcept<
+    Iterator, std::enable_if_t<kHaveIteratorConcept<Iterator>>> {
+  using iterator_concept = typename Iterator::iterator_concept;
+};
+// Otherwise fall back to `std::iterator_traits<Iterator>` if possible.
+template <typename Iterator>
+struct MaybeDefineIteratorConcept<
+    Iterator, std::enable_if_t<kHaveIteratorCategory<Iterator> &&
+                               !kHaveIteratorConcept<Iterator>>> {
+  // There seems to be no feature-test macro covering this, so use the
+  // presence of `<ranges>` as a crude proxy, since it was added to the
+  // standard as part of the Ranges papers.
+  // TODO(pkasting): Add this unconditionally after dropping support for old
+  // libstdc++ versions.
+#if __has_include(<ranges>)
+  using iterator_concept =
+      typename std::iterator_traits<Iterator>::iterator_concept;
+#endif
+};
+
 // A class of iterators that wrap some different iterator type.
 // If specified, ElementType is the type of element accessed by the wrapper
 // iterator; in this case, the actual reference and pointer types of Iterator
 // must be convertible to ElementType& and ElementType*, respectively.
 template <typename Iterator, typename ElementType = void>
-class WrappedIterator {
+class WrappedIterator : public MaybeDefineIteratorConcept<Iterator> {
  public:
   static_assert(
-      !std::is_void_v<ElementType> ||
+      std::is_void_v<ElementType> ||
       (std::is_convertible_v<typename std::iterator_traits<Iterator>::pointer,
-                             ElementType*> &&
+                             std::add_pointer_t<ElementType>> &&
        std::is_convertible_v<typename std::iterator_traits<Iterator>::reference,
-                             ElementType&>));
+                             std::add_lvalue_reference_t<ElementType>>));
 
-  using iterator_category =
-      typename std::iterator_traits<Iterator>::iterator_category;
   using difference_type =
       typename std::iterator_traits<Iterator>::difference_type;
   using value_type =
@@ -1415,24 +1473,96 @@ class WrappedIterator {
   using pointer =
       std::conditional_t<std::is_void_v<ElementType>,
                          typename std::iterator_traits<Iterator>::pointer,
-                         ElementType*>;
+                         std::add_pointer_t<ElementType>>;
   using reference =
       std::conditional_t<std::is_void_v<ElementType>,
                          typename std::iterator_traits<Iterator>::reference,
-                         ElementType&>;
+                         std::add_lvalue_reference_t<ElementType>>;
+  using iterator_category =
+      typename std::iterator_traits<Iterator>::iterator_category;
 
-  constexpr WrappedIterator() noexcept : it_() {}
+  constexpr WrappedIterator() noexcept = default;
   constexpr explicit WrappedIterator(Iterator it) noexcept : it_(it) {}
 
+  // TODO(pkasting): Switch to `requires` and concepts after dropping support
+  // for old gcc and libstdc++ versions.
   template <typename OtherIterator, typename OtherElementType,
-            std::enable_if_t<std::is_convertible_v<OtherIterator, Iterator>,
-                             bool> = true>
+            typename = std::enable_if_t<
+                std::is_convertible_v<OtherIterator, Iterator>>>
   constexpr WrappedIterator(
-      const WrappedIterator<OtherIterator, OtherElementType>& it) noexcept
-      : it_(it.base()) {}
+      const WrappedIterator<OtherIterator, OtherElementType>& other) noexcept
+      : it_(other.base()) {}
 
-  constexpr reference operator*() const noexcept { return *it_; }
-  constexpr pointer operator->() const noexcept { return it_.operator->(); }
+  [[nodiscard]] constexpr reference operator*() const noexcept { return *it_; }
+  [[nodiscard]] constexpr pointer operator->() const noexcept {
+    return it_.operator->();
+  }
+
+  template <typename OtherIterator, typename OtherElementType>
+  [[nodiscard]] constexpr bool operator==(
+      const WrappedIterator<OtherIterator, OtherElementType>& other)
+      const noexcept {
+    return it_ == other.base();
+  }
+#if V8_HAVE_SPACESHIP_OPERATOR
+  template <typename OtherIterator, typename OtherElementType>
+  [[nodiscard]] constexpr auto operator<=>(
+      const WrappedIterator<OtherIterator, OtherElementType>& other)
+      const noexcept {
+    if constexpr (std::three_way_comparable_with<Iterator, OtherIterator>) {
+      return it_ <=> other.base();
+    } else if constexpr (std::totally_ordered_with<Iterator, OtherIterator>) {
+      if (it_ < other.base()) {
+        return std::strong_ordering::less;
+      }
+      return (it_ > other.base()) ? std::strong_ordering::greater
+                                  : std::strong_ordering::equal;
+    } else {
+      if (it_ < other.base()) {
+        return std::partial_ordering::less;
+      }
+      if (other.base() < it_) {
+        return std::partial_ordering::greater;
+      }
+      return (it_ == other.base()) ? std::partial_ordering::equivalent
+                                   : std::partial_ordering::unordered;
+    }
+  }
+#else
+  // Assume that if spaceship isn't present, operator rewriting might not be
+  // either.
+  template <typename OtherIterator, typename OtherElementType>
+  [[nodiscard]] constexpr bool operator!=(
+      const WrappedIterator<OtherIterator, OtherElementType>& other)
+      const noexcept {
+    return it_ != other.base();
+  }
+
+  template <typename OtherIterator, typename OtherElementType>
+  [[nodiscard]] constexpr bool operator<(
+      const WrappedIterator<OtherIterator, OtherElementType>& other)
+      const noexcept {
+    return it_ < other.base();
+  }
+  template <typename OtherIterator, typename OtherElementType>
+  [[nodiscard]] constexpr bool operator<=(
+      const WrappedIterator<OtherIterator, OtherElementType>& other)
+      const noexcept {
+    return it_ <= other.base();
+  }
+  template <typename OtherIterator, typename OtherElementType>
+  [[nodiscard]] constexpr bool operator>(
+      const WrappedIterator<OtherIterator, OtherElementType>& other)
+      const noexcept {
+    return it_ > other.base();
+  }
+  template <typename OtherIterator, typename OtherElementType>
+  [[nodiscard]] constexpr bool operator>=(
+      const WrappedIterator<OtherIterator, OtherElementType>& other)
+      const noexcept {
+    return it_ >= other.base();
+  }
+#endif
 
   constexpr WrappedIterator& operator++() noexcept {
     ++it_;
@@ -1453,116 +1583,68 @@ class WrappedIterator {
     --(*this);
     return result;
   }
-  constexpr WrappedIterator operator+(difference_type n) const noexcept {
+  [[nodiscard]] constexpr WrappedIterator operator+(
+      difference_type n) const noexcept {
     WrappedIterator result(*this);
     result += n;
     return result;
+  }
+  [[nodiscard]] friend constexpr WrappedIterator operator+(
+      difference_type n, const WrappedIterator& x) noexcept {
+    return x + n;
   }
   constexpr WrappedIterator& operator+=(difference_type n) noexcept {
     it_ += n;
     return *this;
   }
-  constexpr WrappedIterator operator-(difference_type n) const noexcept {
-    return *this + (-n);
+  [[nodiscard]] constexpr WrappedIterator operator-(
+      difference_type n) const noexcept {
+    return *this + -n;
   }
   constexpr WrappedIterator& operator-=(difference_type n) noexcept {
-    *this += -n;
-    return *this;
+    return *this += -n;
   }
-  constexpr reference operator[](difference_type n) const noexcept {
+  template <typename OtherIterator, typename OtherElementType>
+  [[nodiscard]] constexpr auto operator-(
+      const WrappedIterator<OtherIterator, OtherElementType>& other)
+      const noexcept {
+    return it_ - other.base();
+  }
+  [[nodiscard]] constexpr reference operator[](
+      difference_type n) const noexcept {
     return it_[n];
   }
 
-  constexpr Iterator base() const noexcept { return it_; }
-
- private:
-  template <typename OtherIterator, typename OtherElementType>
-  friend class WrappedIterator;
+  [[nodiscard]] constexpr const Iterator& base() const noexcept { return it_; }
 
  private:
   Iterator it_;
 };
-
-template <typename Iterator, typename ElementType, typename OtherIterator,
-          typename OtherElementType>
-constexpr bool operator==(
-    const WrappedIterator<Iterator, ElementType>& x,
-    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
-  return x.base() == y.base();
-}
-
-template <typename Iterator, typename ElementType, typename OtherIterator,
-          typename OtherElementType>
-constexpr bool operator<(
-    const WrappedIterator<Iterator, ElementType>& x,
-    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
-  return x.base() < y.base();
-}
-
-template <typename Iterator, typename ElementType, typename OtherIterator,
-          typename OtherElementType>
-constexpr bool operator!=(
-    const WrappedIterator<Iterator, ElementType>& x,
-    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
-  return !(x == y);
-}
-
-template <typename Iterator, typename ElementType, typename OtherIterator,
-          typename OtherElementType>
-constexpr bool operator>(
-    const WrappedIterator<Iterator, ElementType>& x,
-    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
-  return y < x;
-}
-
-template <typename Iterator, typename ElementType, typename OtherIterator,
-          typename OtherElementType>
-constexpr bool operator>=(
-    const WrappedIterator<Iterator, ElementType>& x,
-    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
-  return !(x < y);
-}
-
-template <typename Iterator, typename ElementType, typename OtherIterator,
-          typename OtherElementType>
-constexpr bool operator<=(
-    const WrappedIterator<Iterator, ElementType>& x,
-    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept {
-  return !(y < x);
-}
-
-template <typename Iterator, typename ElementType, typename OtherIterator,
-          typename OtherElementType>
-constexpr auto operator-(
-    const WrappedIterator<Iterator, ElementType>& x,
-    const WrappedIterator<OtherIterator, OtherElementType>& y) noexcept
-    -> decltype(x.base() - y.base()) {
-  return x.base() - y.base();
-}
-
-template <typename Iterator, typename ElementType>
-constexpr WrappedIterator<Iterator> operator+(
-    typename WrappedIterator<Iterator, ElementType>::difference_type n,
-    const WrappedIterator<Iterator, ElementType>& x) noexcept {
-  x += n;
-  return x;
-}
 
 // Helper functions about values contained in handles.
 // A value is either an indirect pointer or a direct pointer, depending on
 // whether direct local support is enabled.
 class ValueHelper final {
  public:
+  // ValueHelper::InternalRepresentationType is an abstract type that
+  // corresponds to the internal representation of v8::Local and essentially
+  // to what T* really is (these two are always in sync). This type is used in
+  // methods like GetDataFromSnapshotOnce that need access to a handle's
+  // internal representation. In particular, if `x` is a `v8::Local<T>`, then
+  // `v8::Local<T>::FromRepr(x.repr())` gives exactly the same handle as `x`.
 #ifdef V8_ENABLE_DIRECT_HANDLE
   static constexpr Address kTaggedNullAddress = 1;
-  static constexpr Address kEmpty = kTaggedNullAddress;
+
+  using InternalRepresentationType = internal::Address;
+  static constexpr InternalRepresentationType kEmpty = kTaggedNullAddress;
 #else
-  static constexpr Address kEmpty = kNullAddress;
+  using InternalRepresentationType = internal::Address*;
+  static constexpr InternalRepresentationType kEmpty = nullptr;
 #endif  // V8_ENABLE_DIRECT_HANDLE
 
   template <typename T>
   V8_INLINE static bool IsEmpty(T* value) {
-    return reinterpret_cast<Address>(value) == kEmpty;
+    return ValueAsRepr(value) == kEmpty;
   }
 
   // Returns a handle's "value" for all kinds of abstract handles. For Local,
@@ -1589,6 +1671,16 @@ class ValueHelper final {
     return *reinterpret_cast<T**>(slot);
   }
 
+  template <typename T>
+  V8_INLINE static InternalRepresentationType ValueAsRepr(const T* value) {
+    return reinterpret_cast<InternalRepresentationType>(value);
+  }
+
+  template <typename T>
+  V8_INLINE static T* ReprAsValue(InternalRepresentationType repr) {
+    return reinterpret_cast<T*>(repr);
+  }
+
 #else  // !V8_ENABLE_DIRECT_HANDLE
 
   template <typename T>
@@ -1599,6 +1691,17 @@ class ValueHelper final {
   template <typename T, bool check_null = true, typename S>
   V8_INLINE static T* SlotAsValue(S* slot) {
     return reinterpret_cast<T*>(slot);
+  }
+
+  template <typename T>
+  V8_INLINE static InternalRepresentationType ValueAsRepr(const T* value) {
+    return const_cast<InternalRepresentationType>(
+        reinterpret_cast<const Address*>(value));
+  }
+
+  template <typename T>
+  V8_INLINE static T* ReprAsValue(InternalRepresentationType repr) {
+    return reinterpret_cast<T*>(repr);
   }
 
 #endif  // V8_ENABLE_DIRECT_HANDLE

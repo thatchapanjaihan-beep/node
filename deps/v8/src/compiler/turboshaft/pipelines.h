@@ -10,8 +10,8 @@
 #include "src/codegen/optimized-compilation-info.h"
 #include "src/compiler/backend/register-allocator-verifier.h"
 #include "src/compiler/basic-block-instrumentor.h"
-#include "src/compiler/graph-visualizer.h"
 #include "src/compiler/pipeline-statistics.h"
+#include "src/compiler/turbofan-graph-visualizer.h"
 #include "src/compiler/turboshaft/block-instrumentation-phase.h"
 #include "src/compiler/turboshaft/build-graph-phase.h"
 #include "src/compiler/turboshaft/code-elimination-and-simplification-phase.h"
@@ -26,11 +26,14 @@
 #include "src/compiler/turboshaft/phase.h"
 #include "src/compiler/turboshaft/register-allocation-phase.h"
 #include "src/compiler/turboshaft/sidetable.h"
-#include "src/compiler/turboshaft/simplified-lowering-phase.h"
 #include "src/compiler/turboshaft/store-store-elimination-phase.h"
 #include "src/compiler/turboshaft/tracing.h"
 #include "src/compiler/turboshaft/type-assertions-phase.h"
 #include "src/compiler/turboshaft/typed-optimizations-phase.h"
+
+#if V8_ENABLE_WEBASSEMBLY
+#include "src/compiler/turboshaft/wasm-in-js-inlining-phase.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8::internal::compiler::turboshaft {
 
@@ -52,7 +55,7 @@ class Pipeline {
     }
   }
 
-  template <CONCEPT(TurboshaftPhase) Phase, typename... Args>
+  template <TurboshaftPhase Phase, typename... Args>
   auto Run(Args&&... args) {
     // Setup run scope.
     PhaseScope phase_scope(data_->pipeline_statistics(), Phase::phase_name());
@@ -164,9 +167,15 @@ class Pipeline {
 
     turboshaft::Tracing::Scope tracing_scope(data_->info());
 
-    if (v8_flags.turboshaft_frontend) {
-      Run<turboshaft::SimplifiedLoweringPhase>();
+#ifdef V8_ENABLE_WEBASSEMBLY
+    // TODO(dlehmann,353475584): Once the Wasm-in-JS TS inlining MVP is feature-
+    // complete and cleaned-up, move its reducer into the beginning of the
+    // `MachineLoweringPhase` since we can reuse the `DataViewLoweringReducer`
+    // there and avoid a separate phase.
+    if (v8_flags.turboshaft_wasm_in_js_inlining) {
+      Run<turboshaft::WasmInJSInliningPhase>();
     }
+#endif  // !V8_ENABLE_WEBASSEMBLY
 
     Run<turboshaft::MachineLoweringPhase>();
 
@@ -513,15 +522,15 @@ class Pipeline {
 
   OptimizedCompilationInfo* info() { return data_->info(); }
 
-  MaybeHandle<Code> FinalizeCode(bool retire_broker = true) {
+  MaybeIndirectHandle<Code> FinalizeCode(bool retire_broker = true) {
     BeginPhaseKind("V8.TFFinalizeCode");
     if (data_->broker() && retire_broker) {
       data_->broker()->Retire();
     }
     Run<FinalizeCodePhase>();
 
-    MaybeHandle<Code> maybe_code = data_->code();
-    Handle<Code> code;
+    MaybeIndirectHandle<Code> maybe_code = data_->code();
+    IndirectHandle<Code> code;
     if (!maybe_code.ToHandle(&code)) {
       return maybe_code;
     }
@@ -532,7 +541,9 @@ class Pipeline {
     // Functions with many inline candidates are sensitive to correct call
     // frequency feedback and should therefore not be tiered up early.
     if (v8_flags.profile_guided_optimization &&
-        info()->could_not_inline_all_candidates()) {
+        info()->could_not_inline_all_candidates() &&
+        info()->shared_info()->cached_tiering_decision() !=
+            CachedTieringDecision::kDelayMaglev) {
       info()->shared_info()->set_cached_tiering_decision(
           CachedTieringDecision::kNormal);
     }

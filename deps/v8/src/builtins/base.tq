@@ -130,6 +130,7 @@ type float64 generates 'TNode<Float64T>' constexpr 'double';
 type bool generates 'TNode<BoolT>' constexpr 'bool';
 type bint generates 'TNode<BInt>' constexpr 'BInt';
 type string constexpr 'const char*';
+type DispatchHandle generates 'TNode<JSDispatchHandleT>';
 
 type Simd128 generates 'TNode<Simd128T>';
 type I8X16 extends Simd128 generates 'TNode<I8x16T>';
@@ -187,36 +188,37 @@ const kDoubleHole: float64_or_hole = float64_or_hole{is_hole: true, value: 0};
 
 @doNotGenerateCast
 @abstract
-extern class JSPrototype extends JSObject generates 'TNode<JSObject>';
-@doNotGenerateCast
-extern class JSObjectPrototype extends JSPrototype
+extern class JSInternalPrototypeBase extends JSObject
     generates 'TNode<JSObject>';
 @doNotGenerateCast
-extern class JSRegExpPrototype extends JSPrototype
+extern class JSObjectPrototype extends JSInternalPrototypeBase
     generates 'TNode<JSObject>';
 @doNotGenerateCast
-extern class JSPromisePrototype extends JSPrototype
+extern class JSRegExpPrototype extends JSInternalPrototypeBase
     generates 'TNode<JSObject>';
 @doNotGenerateCast
-extern class JSTypedArrayPrototype extends JSPrototype
+extern class JSPromisePrototype extends JSInternalPrototypeBase
     generates 'TNode<JSObject>';
 @doNotGenerateCast
-extern class JSSetPrototype extends JSPrototype
+extern class JSTypedArrayPrototype extends JSInternalPrototypeBase
     generates 'TNode<JSObject>';
 @doNotGenerateCast
-extern class JSIteratorPrototype extends JSPrototype
+extern class JSSetPrototype extends JSInternalPrototypeBase
     generates 'TNode<JSObject>';
 @doNotGenerateCast
-extern class JSArrayIteratorPrototype extends JSPrototype
+extern class JSIteratorPrototype extends JSInternalPrototypeBase
     generates 'TNode<JSObject>';
 @doNotGenerateCast
-extern class JSMapIteratorPrototype extends JSPrototype
+extern class JSArrayIteratorPrototype extends JSInternalPrototypeBase
     generates 'TNode<JSObject>';
 @doNotGenerateCast
-extern class JSSetIteratorPrototype extends JSPrototype
+extern class JSMapIteratorPrototype extends JSInternalPrototypeBase
     generates 'TNode<JSObject>';
 @doNotGenerateCast
-extern class JSStringIteratorPrototype extends JSPrototype
+extern class JSSetIteratorPrototype extends JSInternalPrototypeBase
+    generates 'TNode<JSObject>';
+@doNotGenerateCast
+extern class JSStringIteratorPrototype extends JSInternalPrototypeBase
     generates 'TNode<JSObject>';
 
 // The HashTable inheritance hierarchy doesn't actually look like this in C++
@@ -595,6 +597,7 @@ extern macro TrueConstant(): True;
 extern macro UndefinedConstant(): Undefined;
 extern macro ValueOfStringConstant(): String;
 extern macro WasmWrappedObjectSymbolConstant(): Symbol;
+extern macro InvalidDispatchHandleConstant(): DispatchHandle;
 
 const TheHole: TheHole = TheHoleConstant();
 const PromiseHole: PromiseHole = PromiseHoleConstant();
@@ -621,6 +624,13 @@ const false: constexpr bool generates 'false';
 
 extern enum LanguageMode extends bool { kStrict, kSloppy }
 type LanguageModeSmi extends Smi;
+
+// Dispatch handle constant used when tailcalling into C++ builtins. As these
+// currently don't use the dispatch handle parameter, we can just use a constant
+// here. Alternatively, we could obtain the "real" dispatch handle (the one used
+// for calling the torque builtin) through a new CSA function that accesses the
+// kJSCallDispatchHandle parameter.
+const kInvalidDispatchHandle: DispatchHandle = InvalidDispatchHandleConstant();
 
 const SKIP_WRITE_BARRIER:
     constexpr WriteBarrierMode generates 'SKIP_WRITE_BARRIER';
@@ -671,6 +681,9 @@ extern macro PrintErr(constexpr string, Object): void;
 extern macro PrintErr(Object): void;
 extern macro Comment(constexpr string): void;
 extern macro DebugBreak(): void;
+
+extern macro SetSupportsDynamicParameterCount(
+    JSFunction, DispatchHandle): void;
 
 // ES6 7.1.4 ToInteger ( argument )
 transitioning macro ToIntegerImpl(

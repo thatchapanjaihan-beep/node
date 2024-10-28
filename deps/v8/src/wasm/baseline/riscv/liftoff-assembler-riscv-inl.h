@@ -85,9 +85,15 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
   Branch(ool_label, lt, budget, Operand{0});
 }
 
+Register LiftoffAssembler::LoadOldFramePointer() { return fp; }
+void LiftoffAssembler::CheckStackShrink() {
+  // TODO(irezvov): 42202153
+  UNIMPLEMENTED();
+}
+
 void LiftoffAssembler::PatchPrepareStackFrame(
     int offset, SafepointTableBuilder* safepoint_table_builder,
-    bool feedback_vector_slot) {
+    bool feedback_vector_slot, size_t stack_param_slots) {
   // The frame_size includes the frame marker and the instance slot. Both are
   // pushed as part of frame construction, so we don't need to allocate memory
   // for them anymore.
@@ -2198,11 +2204,6 @@ void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
   VU.set(kScratchReg, E64, m1);
   vfnmsub_vv(src1.fp().toV(), src2.fp().toV(), src3.fp().toV());
   vmv_vv(dst.fp().toV(), src1.fp().toV());
-}
-
-void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t oob_size,
-                                             uint64_t oob_index) {
-  UNREACHABLE();
 }
 
 void LiftoffAssembler::StackCheck(Label* ool_code) {

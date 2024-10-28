@@ -86,7 +86,9 @@ enum class IsolateFieldId : uint8_t;
   V(shared_external_pointer_table_address_address,              \
     "Isolate::shared_external_pointer_table_address_address()") \
   V(trusted_pointer_table_base_address,                         \
-    "Isolate::trusted_pointer_table_base_address()")
+    "Isolate::trusted_pointer_table_base_address()")            \
+  V(shared_trusted_pointer_table_base_address,                  \
+    "Isolate::shared_trusted_pointer_table_base_address()")
 #else
 #define EXTERNAL_REFERENCE_LIST_WITH_ISOLATE_SANDBOX(V)
 #endif  // V8_ENABLE_SANDBOX
@@ -255,6 +257,9 @@ enum class IsolateFieldId : uint8_t;
           "wasm::switch_to_the_central_stack_for_js")                          \
   IF_WASM(V, wasm_switch_from_the_central_stack_for_js,                        \
           "wasm::switch_from_the_central_stack_for_js")                        \
+  IF_WASM(V, wasm_grow_stack, "wasm::grow_stack")                              \
+  IF_WASM(V, wasm_shrink_stack, "wasm::shrink_stack")                          \
+  IF_WASM(V, wasm_load_old_fp, "wasm::load_old_fp")                            \
   IF_WASM(V, wasm_f32_ceil, "wasm::f32_ceil_wrapper")                          \
   IF_WASM(V, wasm_f32_floor, "wasm::f32_floor_wrapper")                        \
   IF_WASM(V, wasm_f32_nearest_int, "wasm::f32_nearest_int_wrapper")            \
@@ -460,12 +465,13 @@ enum class IsolateFieldId : uint8_t;
 #endif  // V8_INTL_SUPPORT
 
 #ifdef V8_ENABLE_SANDBOX
-#define EXTERNAL_REFERENCE_LIST_SANDBOX(V)                          \
-  V(sandbox_base_address, "Sandbox::base()")                        \
-  V(sandbox_end_address, "Sandbox::end()")                          \
-  V(empty_backing_store_buffer, "EmptyBackingStoreBuffer()")        \
-  V(code_pointer_table_address, "GetProcessWideCodePointerTable()") \
-  V(js_dispatch_table_address, "GetProcessWideJSDispatchTable()")   \
+#define EXTERNAL_REFERENCE_LIST_SANDBOX(V)                        \
+  V(sandbox_base_address, "Sandbox::base()")                      \
+  V(sandbox_end_address, "Sandbox::end()")                        \
+  V(empty_backing_store_buffer, "EmptyBackingStoreBuffer()")      \
+  V(code_pointer_table_address,                                   \
+    "IsolateGroup::current()->code_pointer_table()")              \
+  V(js_dispatch_table_address, "GetProcessWideJSDispatchTable()") \
   V(memory_chunk_metadata_table_address, "MemoryChunkMetadata::Table()")
 #else
 #define EXTERNAL_REFERENCE_LIST_SANDBOX(V)

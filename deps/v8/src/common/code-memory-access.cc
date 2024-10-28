@@ -92,7 +92,8 @@ void ThreadIsolation::Initialize(
 #endif
 
 #if V8_HAS_PKU_JIT_WRITE_PROTECT
-  if (enable && !base::MemoryProtectionKey::HasMemoryProtectionKeySupport()) {
+  if (!v8_flags.memory_protection_keys ||
+      !base::MemoryProtectionKey::HasMemoryProtectionKeySupport()) {
     enable = false;
   }
 #endif
@@ -460,23 +461,25 @@ bool ThreadIsolation::MakeExecutable(Address address, size_t size) {
 
 // static
 WritableJitAllocation ThreadIsolation::RegisterJitAllocation(
-    Address obj, size_t size, JitAllocationType type) {
+    Address obj, size_t size, JitAllocationType type, bool enforce_write_api) {
   return WritableJitAllocation(
-      obj, size, type, WritableJitAllocation::JitAllocationSource::kRegister);
+      obj, size, type, WritableJitAllocation::JitAllocationSource::kRegister,
+      enforce_write_api);
 }
 
 // static
 WritableJitAllocation ThreadIsolation::RegisterInstructionStreamAllocation(
-    Address addr, size_t size) {
-  return RegisterJitAllocation(addr, size,
-                               JitAllocationType::kInstructionStream);
+    Address addr, size_t size, bool enforce_write_api) {
+  return RegisterJitAllocation(
+      addr, size, JitAllocationType::kInstructionStream, enforce_write_api);
 }
 
 // static
 WritableJitAllocation ThreadIsolation::LookupJitAllocation(
-    Address addr, size_t size, JitAllocationType type) {
+    Address addr, size_t size, JitAllocationType type, bool enforce_write_api) {
   return WritableJitAllocation(
-      addr, size, type, WritableJitAllocation::JitAllocationSource::kLookup);
+      addr, size, type, WritableJitAllocation::JitAllocationSource::kLookup,
+      enforce_write_api);
 }
 
 // static

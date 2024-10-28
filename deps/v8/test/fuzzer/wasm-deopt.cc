@@ -103,6 +103,19 @@ class NearHeapLimitCallbackScope {
   size_t initial_limit_ = 0;
 };
 
+class EnterDebuggingScope {
+ public:
+  explicit EnterDebuggingScope(Isolate* isolate) : isolate_(isolate) {
+    GetWasmEngine()->EnterDebuggingForIsolate(isolate_);
+  }
+  ~EnterDebuggingScope() {
+    GetWasmEngine()->LeaveDebuggingForIsolate(isolate_);
+  }
+
+ private:
+  Isolate* isolate_;
+};
+
 std::vector<ExecutionResult> PerformReferenceRun(
     const std::vector<std::string>& callees, ModuleWireBytes wire_bytes,
     WasmEnabledFeatures enabled_features, bool valid, Isolate* isolate) {
@@ -112,6 +125,12 @@ std::vector<ExecutionResult> PerformReferenceRun(
 
   int32_t max_steps = kDefaultMaxFuzzerExecutedInstructions;
   int32_t nondeterminism = 0;
+
+  // We aren't really debugging but this will prevent tier-up and other
+  // "dynamic" behavior that we do not want to trigger during reference
+  // execution. This also aligns well with the reference compilation compiling
+  // with the kForDebugging liftoff option.
+  EnterDebuggingScope debugging_scope(isolate);
 
   Handle<WasmModuleObject> module_object = CompileReferenceModule(
       isolate, wire_bytes.module_bytes(), &max_steps, &nondeterminism);
@@ -168,6 +187,9 @@ int FuzzIt(base::Vector<const uint8_t> data) {
   v8_fuzzer::FuzzerSupport* support = v8_fuzzer::FuzzerSupport::Get();
   v8::Isolate* isolate = support->GetIsolate();
 
+  // Strictly enforce the input size limit as in wasm-fuzzer-common.h.
+  if (data.size() > kMaxFuzzerInputSize) return 0;
+
   Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
   v8::Isolate::Scope isolate_scope(isolate);
 
@@ -175,13 +197,18 @@ int FuzzIt(base::Vector<const uint8_t> data) {
   // are saved as recursive groups as part of the type canonicalizer, but types
   // from previous runs just waste memory.
   GetTypeCanonicalizer()->EmptyStorageForTesting();
-  i_isolate->heap()->ClearWasmCanonicalRttsForTesting();
+  TypeCanonicalizer::ClearWasmCanonicalTypesForTesting(i_isolate);
 
   v8::HandleScope handle_scope(isolate);
   v8::Context::Scope context_scope(support->GetContext());
 
-  //  We switch it to synchronous mode to avoid the nondeterminism of background
-  //  jobs finishing at random times.
+  // Disable the NativeModule cache. Different fuzzer iterations should not
+  // interact with each other. Rerunning a fuzzer input (e.g. with libfuzzer's
+  // "-runs=x" argument) should repeatedly test deoptimizations. When caching
+  // the optimized code, only the first run will execute any deopts.
+  FlagScope<bool> no_module_cache(&v8_flags.wasm_native_module_cache, false);
+  // We switch it to synchronous mode to avoid the nondeterminism of background
+  // jobs finishing at random times.
   FlagScope<bool> sync_tier_up_scope(&v8_flags.wasm_sync_tier_up, true);
   // Enable the experimental features we want to fuzz. (Note that
   // EnableExperimentalWasmFeatures only enables staged features.)

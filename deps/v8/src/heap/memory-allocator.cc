@@ -34,6 +34,7 @@ void DeleteMemoryChunk(MemoryChunkMetadata* metadata) {
   DCHECK(!chunk->InReadOnlySpace());
   // The Metadata contains a VirtualMemory reservation and the destructor will
   // release the MemoryChunk.
+  DiscardSealedMemoryScope discard_scope("Deleting a memory chunk");
   if (chunk->IsLargePage()) {
     delete reinterpret_cast<LargePageMetadata*>(metadata);
   } else {
@@ -278,6 +279,7 @@ void MemoryAllocator::PartialFreeMemory(MemoryChunkMetadata* chunk,
          V8_HEAP_USE_BECORE_JIT_WRITE_PROTECT) &&
         !isolate_->jitless()) {
       DCHECK(isolate_->RequiresCodeRange());
+      DiscardSealedMemoryScope discard_scope("Partially free memory.");
       reservation->DiscardSystemPages(chunk->area_end(), page_size);
     } else {
       CHECK(reservation->SetPermissions(chunk->area_end(), page_size,
@@ -429,6 +431,20 @@ PageMetadata* MemoryAllocator::AllocatePage(
   }
   MemoryChunk* chunk;
   MemoryChunk::MainThreadFlags flags = metadata->InitialFlags(executable);
+  if (v8_flags.black_allocated_pages && space->identity() != NEW_SPACE &&
+      space->identity() != NEW_LO_SPACE &&
+      isolate_->heap()->incremental_marking()->black_allocation()) {
+    // Disable the write barrier for objects pointing to this page. We don't
+    // need to trigger the barrier for pointers to old black-allocated pages,
+    // since those are never considered for evacuation. However, we have to
+    // keep the old->shared remembered set across multiple GCs, so those
+    // pointers still need to be recorded.
+    if (!IsAnySharedSpace(space->identity())) {
+      flags &= ~MemoryChunk::POINTERS_TO_HERE_ARE_INTERESTING;
+    }
+    // And mark the page as black allocated.
+    flags |= MemoryChunk::BLACK_ALLOCATED;
+  }
   if (executable) {
     RwxMemoryWriteScope scope("Initialize a new MemoryChunk.");
     chunk = new (chunk_info->chunk) MemoryChunk(flags, metadata);
@@ -542,19 +558,6 @@ void MemoryAllocator::InitializeOncePerProcess() {
                           : CommitPageSize();
   CHECK(base::bits::IsPowerOfTwo(commit_page_size_));
   commit_page_size_bits_ = base::bits::WhichPowerOfTwo(commit_page_size_);
-}
-
-base::AddressRegion MemoryAllocator::ComputeDiscardMemoryArea(Address addr,
-                                                              size_t size) {
-  size_t page_size = GetCommitPageSize();
-  if (size < page_size + FreeSpace::kSize) {
-    return base::AddressRegion(0, 0);
-  }
-  Address discardable_start = RoundUp(addr + FreeSpace::kSize, page_size);
-  Address discardable_end = RoundDown(addr + size, page_size);
-  if (discardable_start >= discardable_end) return base::AddressRegion(0, 0);
-  return base::AddressRegion(discardable_start,
-                             discardable_end - discardable_start);
 }
 
 bool MemoryAllocator::SetPermissionsOnExecutableMemoryChunk(VirtualMemory* vm,

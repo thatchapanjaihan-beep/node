@@ -59,6 +59,11 @@ constexpr uint64_t kFP64To16DenormalMagic =
     (kFP16MinExponent + (kFP64MantissaBits - kFP16MantissaBits))
     << kFP64MantissaBits;
 
+constexpr uint32_t kFP32WithoutSignMask = 0x7fffffff;
+constexpr uint32_t kFP32MinFP16ZeroRepresentable = 0x33000000;
+constexpr uint32_t kFP32MaxFP16Representable = 0x47800000;
+constexpr uint32_t kFP32SubnormalThresholdOfFP16 = 0x38800000;
+
 // The limit for the the fractionDigits/precision for toFixed, toPrecision
 // and toExponential.
 const int kMaxFractionDigits = 100;
@@ -238,7 +243,7 @@ double FlatStringToDouble(Tagged<String> string, ConversionFlag flags,
 // can be represented using a string of length 23.
 V8_EXPORT_PRIVATE std::optional<double> TryStringToDouble(
     LocalIsolate* isolate, DirectHandle<String> object,
-    int max_length_for_conversion = 23);
+    uint32_t max_length_for_conversion = 23);
 
 // Return std::nullopt if the string is longer than 20.
 V8_EXPORT_PRIVATE std::optional<double> TryStringToInt(

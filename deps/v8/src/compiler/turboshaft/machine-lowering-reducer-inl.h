@@ -59,6 +59,12 @@ class MachineLoweringReducer : public Next {
     }
   }
 
+  V<Word32> REDUCE(Word32SignHint)(V<Word32> input, Word32SignHintOp::Sign) {
+    // As far as Machine operations are concerned, Int32 and Uint32 are both
+    // Word32.
+    return input;
+  }
+
   V<Untagged> REDUCE(ChangeOrDeopt)(V<Untagged> input,
                                     V<FrameState> frame_state,
                                     ChangeOrDeoptOp::Kind kind,
@@ -183,7 +189,7 @@ class MachineLoweringReducer : public Next {
     if (ShouldSkipOptimizationStep()) goto no_change;
     // Block cloning only works for branches, but not for `DeoptimizeIf`. On the
     // other hand, explicit control flow makes the overall pipeline and
-    // escpecially the register allocator slower. So we only switch a
+    // especially the register allocator slower. So we only switch a
     // `DeoptiomizeIf` to a branch if it has a phi input, which indicates that
     // block cloning could be helpful.
     if (__ Get(condition).template Is<PhiOp>()) {
@@ -501,6 +507,7 @@ class MachineLoweringReducer : public Next {
                                 (kIsNotStringMask | kIsNotInternalizedMask)),
             kInternalizedTag);
       }
+      case ObjectIsOp::Kind::kStringWrapper:
       case ObjectIsOp::Kind::kStringOrStringWrapper: {
         Label<Word32> done(this);
 
@@ -513,8 +520,10 @@ class MachineLoweringReducer : public Next {
         V<Map> map = __ LoadMapField(input);
         V<Word32> instance_type = __ LoadInstanceTypeField(map);
 
-        GOTO_IF(__ Uint32LessThan(instance_type, FIRST_NONSTRING_TYPE), done,
-                1);
+        if (kind == ObjectIsOp::Kind::kStringOrStringWrapper) {
+          GOTO_IF(__ Uint32LessThan(instance_type, FIRST_NONSTRING_TYPE), done,
+                  1);
+        }
         GOTO_IF_NOT(__ Word32Equal(instance_type, JS_PRIMITIVE_WRAPPER_TYPE),
                     done, 0);
 
@@ -756,8 +765,8 @@ class MachineLoweringReducer : public Next {
               TagSmiOrOverflow(input_w32, &overflow, &done);
 
               if (BIND(overflow)) {
-                GOTO(done, AllocateHeapNumberWithValue(
-                               __ ChangeInt32ToFloat64(input_w32)));
+                GOTO(done,
+                     AllocateHeapNumber(__ ChangeInt32ToFloat64(input_w32)));
               }
 
               BIND(done, result);
@@ -769,8 +778,8 @@ class MachineLoweringReducer : public Next {
 
               GOTO_IF(__ Uint32LessThanOrEqual(input_w32, Smi::kMaxValue), done,
                       __ TagSmi(input_w32));
-              GOTO(done, AllocateHeapNumberWithValue(
-                             __ ChangeUint32ToFloat64(input_w32)));
+              GOTO(done,
+                   AllocateHeapNumber(__ ChangeUint32ToFloat64(input_w32)));
 
               BIND(done, result);
               return result;
@@ -798,8 +807,8 @@ class MachineLoweringReducer : public Next {
               }
 
               if (BIND(outside_smi_range)) {
-                GOTO(done, AllocateHeapNumberWithValue(
-                               __ ChangeInt64ToFloat64(input_w64)));
+                GOTO(done,
+                     AllocateHeapNumber(__ ChangeInt64ToFloat64(input_w64)));
               }
 
               BIND(done, result);
@@ -811,8 +820,8 @@ class MachineLoweringReducer : public Next {
 
               GOTO_IF(__ Uint64LessThanOrEqual(input_w64, Smi::kMaxValue), done,
                       __ TagSmi(__ TruncateWord64ToWord32(input_w64)));
-              GOTO(done, AllocateHeapNumberWithValue(
-                             __ ChangeInt64ToFloat64(input_w64)));
+              GOTO(done,
+                   AllocateHeapNumber(__ ChangeInt64ToFloat64(input_w64)));
 
               BIND(done, result);
               return result;
@@ -849,7 +858,7 @@ class MachineLoweringReducer : public Next {
           }
 
           if (BIND(outside_smi_range)) {
-            GOTO(done, AllocateHeapNumberWithValue(input_f64));
+            GOTO(done, AllocateHeapNumber(input_f64));
           }
 
           BIND(done, result);
@@ -862,7 +871,7 @@ class MachineLoweringReducer : public Next {
         DCHECK_EQ(input_rep, RegisterRepresentation::Float64());
         DCHECK_EQ(input_interpretation,
                   ConvertUntaggedToJSPrimitiveOp::InputInterpretation::kSigned);
-        return AllocateHeapNumberWithValue(V<Float64>::Cast(input));
+        return AllocateHeapNumber(V<Float64>::Cast(input));
       }
       case ConvertUntaggedToJSPrimitiveOp::JSPrimitiveKind::
           kHeapNumberOrUndefined: {
@@ -886,7 +895,7 @@ class MachineLoweringReducer : public Next {
         }
 
         if (BIND(allocate_heap_number)) {
-          GOTO(done, AllocateHeapNumberWithValue(input_f64));
+          GOTO(done, AllocateHeapNumber(input_f64));
         }
 
         BIND(done, result);
@@ -1256,7 +1265,7 @@ class MachineLoweringReducer : public Next {
             builder.AddReturn(MachineType::Int32());
             builder.AddParam(MachineType::TaggedPointer());
             auto desc = Linkage::GetSimplifiedCDescriptor(__ graph_zone(),
-                                                          builder.Build());
+                                                          builder.Get());
             auto ts_desc = TSCallDescriptor::Create(
                 desc, CanThrow::kNo, LazyDeoptOnThrow::kNo, __ graph_zone());
             OpIndex callee = __ ExternalConstant(
@@ -1571,7 +1580,7 @@ class MachineLoweringReducer : public Next {
       case NewArrayOp::Kind::kDouble: {
         size_log2 = kDoubleSizeLog2;
         array_map = factory_->fixed_double_array_map();
-        access = {kTaggedBase, FixedDoubleArray::kHeaderSize,
+        access = {kTaggedBase, OFFSET_OF_DATA_START(FixedDoubleArray),
                   compiler::Type::NumberOrHole(), MachineType::Float64(),
                   kNoWriteBarrier};
         the_hole_value = __ template LoadField<Float64>(
@@ -1582,8 +1591,9 @@ class MachineLoweringReducer : public Next {
       case NewArrayOp::Kind::kObject: {
         size_log2 = kTaggedSizeLog2;
         array_map = factory_->fixed_array_map();
-        access = {kTaggedBase, FixedArray::kHeaderSize, compiler::Type::Any(),
-                  MachineType::AnyTagged(), kNoWriteBarrier};
+        access = {kTaggedBase, OFFSET_OF_DATA_START(FixedArray),
+                  compiler::Type::Any(), MachineType::AnyTagged(),
+                  kNoWriteBarrier};
         the_hole_value = __ HeapConstant(factory_->the_hole_value());
         break;
       }
@@ -1683,7 +1693,8 @@ class MachineLoweringReducer : public Next {
             __ Load(properties, out_of_object_index,
                     LoadOp::Kind::Aligned(BaseTaggedness::kTaggedBase),
                     MemoryRepresentation::AnyTagged(),
-                    FixedArray::kHeaderSize - kTaggedSize, kTaggedSizeLog2 - 1);
+                    OFFSET_OF_DATA_START(FixedArray) - kTaggedSize,
+                    kTaggedSizeLog2 - 1);
         GOTO(done, result);
       } ELSE {
         // This field is located in the {object} itself.
@@ -1707,11 +1718,11 @@ class MachineLoweringReducer : public Next {
             object, AccessBuilder::ForJSObjectPropertiesOrHashKnownPointer());
 
         V<WordPtr> out_of_object_index = __ WordPtrSub(0, double_index);
-        V<Object> result =
-            __ Load(properties, out_of_object_index,
-                    LoadOp::Kind::Aligned(BaseTaggedness::kTaggedBase),
-                    MemoryRepresentation::AnyTagged(),
-                    FixedArray::kHeaderSize - kTaggedSize, kTaggedSizeLog2);
+        V<Object> result = __ Load(
+            properties, out_of_object_index,
+            LoadOp::Kind::Aligned(BaseTaggedness::kTaggedBase),
+            MemoryRepresentation::AnyTagged(),
+            OFFSET_OF_DATA_START(FixedArray) - kTaggedSize, kTaggedSizeLog2);
         GOTO(loaded_field, result);
       } ELSE {
         // The field is located in the {object} itself.
@@ -1734,7 +1745,7 @@ class MachineLoweringReducer : public Next {
             done, field);
 
         V<Float64> value = __ LoadHeapNumberValue(V<HeapNumber>::Cast(field));
-        GOTO(done, AllocateHeapNumberWithValue(value));
+        GOTO(done, AllocateHeapNumber(value));
       }
     }
 
@@ -2265,6 +2276,8 @@ class MachineLoweringReducer : public Next {
   }
 
   V<Word32> REDUCE(StringLength)(V<String> string) {
+    // TODO(dmercadier): Somewhere (maybe not here but instead in a new
+    // SimplifiedOptimizationReducer?), constant fold StringLength(Constant).
     return __ template LoadField<Word32>(string,
                                          AccessBuilder::ForStringLength());
   }
@@ -2583,7 +2596,7 @@ class MachineLoweringReducer : public Next {
               // Our ElementsKind is HOLEY_ELEMENTS.
               __ StoreNonArrayBufferElement(
                   elements, AccessBuilder::ForFixedArrayElement(HOLEY_ELEMENTS),
-                  index, AllocateHeapNumberWithValue(value));
+                  index, AllocateHeapNumber(value));
               GOTO(done);
             }
 
@@ -2993,10 +3006,9 @@ class MachineLoweringReducer : public Next {
           __ ExternalConstant(ExternalReference::isolate_address());
       V<String> value_internalized = V<String>::Cast(__ Call(
           try_string_to_index_or_lookup_existing, {isolate_ptr, value},
-          TSCallDescriptor::Create(Linkage::GetSimplifiedCDescriptor(
-                                       __ graph_zone(), builder.Build()),
-                                   CanThrow::kNo, LazyDeoptOnThrow::kNo,
-                                   __ graph_zone())));
+          TSCallDescriptor::Create(
+              Linkage::GetSimplifiedCDescriptor(__ graph_zone(), builder.Get()),
+              CanThrow::kNo, LazyDeoptOnThrow::kNo, __ graph_zone())));
 
       // Now see if the results match.
       __ DeoptimizeIfNot(__ TaggedEqual(expected, value_internalized),
@@ -3441,7 +3453,7 @@ class MachineLoweringReducer : public Next {
     return __ Word32Equal(__ Word32Equal(value, 0), 0);
   }
 
-  V<HeapNumber> AllocateHeapNumberWithValue(V<Float64> value) {
+  V<HeapNumber> AllocateHeapNumber(V<Float64> value) {
     return __ AllocateHeapNumberWithValue(value, factory_);
   }
 
